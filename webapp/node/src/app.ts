@@ -440,7 +440,7 @@ app.get('/logout', async (c: AppContext) => {
 app.get('/', async (c: AppContext) => {
   try {
     const me = await getSessionUser(c)
-    const [postRows] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC')
+    const [postRows] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC LIMIT 50')
     const posts = postRows as Post[]
     const enriched = await makePosts(posts)
     return render(c, 'index.ejs', { posts: enriched, me, imageUrl })
