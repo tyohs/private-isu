@@ -9,6 +9,7 @@ import crypto from 'crypto'
 import { spawnSync } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { clearUploadedImages, writeImage } from './image-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -367,6 +368,7 @@ function ensureStringArray(value: ParsedBodyValue): string[] {
 app.get('/initialize', async (c: AppContext) => {
   try {
     await dbInitialize()
+    await clearUploadedImages()
     return c.text('OK')
   } catch (e) {
     console.error(e)
@@ -563,6 +565,12 @@ app.post('/', async (c: AppContext) => {
   const buffer = Buffer.from(await file.arrayBuffer())
   const [result] = await db.query<ResultSetHeader>('INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)', [me.id, mime, buffer, ensureString(body.body)])
   const insertId = result.insertId
+  try {
+    await writeImage(insertId, mime, buffer)
+  } catch (e) {
+    // The DB image route still works when the file cannot be saved.
+    console.error('image file write failed', e)
+  }
   return c.redirect(`/posts/${encodeURIComponent(String(insertId))}`)
 })
 
@@ -577,6 +585,11 @@ app.get('/image/:filename{[0-9]+\\.(png|jpg|gif)}', async (c: AppContext) => {
     const post = (posts as Post[])[0]
     if (!post) return c.text('image not found', 404)
     if ((ext === 'jpg' && post.mime === 'image/jpeg') || (ext === 'png' && post.mime === 'image/png') || (ext === 'gif' && post.mime === 'image/gif')) {
+      try {
+        await writeImage(id, post.mime, post.imgdata)
+      } catch (e) {
+        console.error('image file write failed', e)
+      }
       return new Response(new Uint8Array(post.imgdata), { headers: { 'Content-Type': post.mime } })
     }
     return c.text('image not found', 404)
