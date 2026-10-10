@@ -3,6 +3,7 @@ version: '3'
 vars:
   NGINX_LOG: '{{.TASKFILE_DIR}}/webapp/etc/nginx/log/access.log'
   MYSQL_SLOW_LOG: '{{.TASKFILE_DIR}}/webapp/etc/mysql/log/slow.log'
+  COMPOSE_FILE: '{{.TASKFILE_DIR}}/webapp/compose.yml'
 
 tasks:
   default:
@@ -52,6 +53,25 @@ tasks:
         pt-query-digest "{{.MYSQL_SLOW_LOG}}" \
           > "./log/mysql/digest_{{.TIMESTAMP}}.txt"
         cat "./log/mysql/digest_{{.TIMESTAMP}}.txt"
+       
+        # Nginx log rotation
+      - |
+        echo
+        echo "===== Rotate Nginx log ====="
+        sudo touch "{{.NGINX_LOG}}"
+        sudo chown 101:101 "{{.NGINX_LOG}}" || true
+        sudo mv "{{.NGINX_LOG}}" \
+          "./webapp/etc/nginx/log/{{.TIMESTAMP}}_access.log"
+        docker compose -f "{{.COMPOSE_FILE}}" exec nginx nginx -s reopen
+
+         # MySQL log rotation
+      - |
+        echo
+        echo "===== Rotate MySQL slow log ====="
+        sudo mv "{{.MYSQL_SLOW_LOG}}" \
+          "./webapp/etc/mysql/log/{{.TIMESTAMP}}_slow.log"
+        docker compose -f "{{.COMPOSE_FILE}}" exec mysql mysqladmin \
+          -uroot -proot flush-logs
 
   connect-mysql:
     desc: コンテナ内のMySQLに接続する（パスワードは対話入力）
