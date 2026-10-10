@@ -440,9 +440,45 @@ app.get('/logout', async (c: AppContext) => {
 app.get('/', async (c: AppContext) => {
   try {
     const me = await getSessionUser(c)
-    const [postRows] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC LIMIT 50')
-    const posts = postRows as Post[]
-    const enriched = await makePosts(posts)
+
+    const [postUsers] = await db.query<RowDataPacket[]>(
+      'SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at` as post_created_at, p.`mime`, '
+      + 'u.`account_name`, u.`passhash`, u.`authority`, u.`del_flg`, u.`created_at`as user_created_at '
+      + 'FROM `posts`as p '
+      + 'LEFT JOIN `users` as u '
+      + 'ON p.`user_id` = u.`id` '
+      + 'WHERE u.`del_flg` = 0 '
+      + 'ORDER BY p.`created_at` DESC '
+      + 'LIMIT 20'
+    )
+
+    let enriched: Post[] = []
+    for (const row of postUsers) {
+      const [[[commentRows]], [[commentCount]]] = await Promise.all([
+        db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id]),
+        db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [row.id])
+      ])
+
+      const post: Post = {
+        id: row.id,
+        user_id: row.user_id,
+        imgdata: Buffer.alloc(0),
+        body: row.body,
+        mime: row.mime,
+        created_at: row.post_created_at,
+        comment_count: (commentCount as CountRow | undefined)?.count || 0,
+        comments: commentRows.reverse(),
+        user: {
+          id: row.user_id,
+          account_name: row.account_name,
+          passhash: row.passhash,
+          authority: row.authority,
+          del_flg: row.del_flg,
+          created_at: row.user_created_at
+        }
+      }
+      enriched.push(post)
+    }
     return render(c, 'index.ejs', { posts: enriched, me, imageUrl })
   } catch (e) {
     console.error(e)
