@@ -495,7 +495,18 @@ app.get('/:accountName{@[A-Za-z0-9_]+}', async (c: AppContext) => {
     const user = urows[0] as User
     if (!user) return c.text('not_found', 404)
     const [postRowData] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC', [user.id])
-    const posts = await makePosts(postRowData as Post[])
+    const posts: Post[] = []
+    for (const row of (postRowData as Post[]).slice(0, POSTS_PER_PAGE)) {
+      const [[countRow]] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [row.id])
+      const [commentRows] = await db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id])
+      const comments = await Promise.all((commentRows as Comment[]).map(makeComment))
+      posts.push({
+        ...row,
+        user,
+        comment_count: (countRow as CountRow | undefined)?.count || 0,
+        comments: comments.reverse()
+      })
+    }
     const [commentCountRows] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?', [user.id])
     const commentCount = (commentCountRows[0] as CountRow | undefined)?.count ?? 0
     const [postIdRows] = await db.query<RowDataPacket[]>('SELECT `id` FROM `posts` WHERE `user_id` = ?', [user.id])
