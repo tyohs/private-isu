@@ -456,7 +456,7 @@ app.get('/', async (c: AppContext) => {
 
     let enriched: Post[] = []
     for (const row of postUsers) {
-      const [[[commentRows]], [[commentCount]]] = await Promise.all([
+      const [[commentRows], [[commentCount]]] = await Promise.all([
         db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id]),
         db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [row.id])
       ])
@@ -469,7 +469,7 @@ app.get('/', async (c: AppContext) => {
         mime: row.mime,
         created_at: row.post_created_at,
         comment_count: (commentCount as CountRow | undefined)?.count || 0,
-        comments: commentRows.reverse(),
+        comments: (await Promise.all((commentRows as Comment[]).map(makeComment))).reverse(),
         user: {
           id: row.user_id,
           account_name: row.account_name,
