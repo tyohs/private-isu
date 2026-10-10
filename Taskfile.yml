@@ -46,14 +46,14 @@ tasks:
         set -e
         mkdir -p ./log/nginx ./log/mysql
         alp ltsv --sort sum -r --nosave-pos \
-          --matching-groups='/posts/[0-9]+,/image/[0-9]+,/@[^/?]+' \
+          --matching-groups='/posts/[0-9]+,/image/[0-9]+,/@[A-Za-z0-9_]+' \
           --file "{{.NGINX_LOG}}" \
           > "./log/nginx/alp_{{.TIMESTAMP}}.txt"
         cat "./log/nginx/alp_{{.TIMESTAMP}}.txt"
         pt-query-digest "{{.MYSQL_SLOW_LOG}}" \
           > "./log/mysql/digest_{{.TIMESTAMP}}.txt"
         cat "./log/mysql/digest_{{.TIMESTAMP}}.txt"
-       
+
         # Nginx log rotation
       - |
         echo
@@ -72,6 +72,7 @@ tasks:
           "./webapp/etc/mysql/log/{{.TIMESTAMP}}_slow.log"
         docker compose -f "{{.COMPOSE_FILE}}" exec mysql mysqladmin \
           -uroot -proot flush-logs
+        sudo chmod 755 "{{.MYSQL_SLOW_LOG}}" || true
 
   connect-mysql:
     desc: コンテナ内のMySQLに接続する（パスワードは対話入力）
