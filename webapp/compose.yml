@@ -5,8 +5,10 @@ services:
     depends_on:
       - app
     volumes:
+      - ./etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./etc/nginx/conf.d:/etc/nginx/conf.d
       - ./public:/public
+      - ./etc/nginx/log:/var/log/nginx
     ports:
       - "80:80"
     networks:
@@ -15,7 +17,7 @@ services:
   app:
     build:
       # Go実装は golang/ PHP実装は php/ Python実装は python/ Node.js実装は node/ に変更
-      context: ruby/
+      context: node/
       dockerfile: Dockerfile
     depends_on:
       - mysql
@@ -47,6 +49,8 @@ services:
     volumes:
       - mysql:/var/lib/mysql
       - ./sql:/docker-entrypoint-initdb.d
+      - ./etc/mysql/conf.d:/etc/mysql/conf.d
+      - ./etc/mysql/log:/var/log/mysql
     ports:
       - "3306:3306"
     networks:

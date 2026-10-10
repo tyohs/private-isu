@@ -1,0 +1,81 @@
+version: '3'
+
+vars:
+  NGINX_LOG: '{{.TASKFILE_DIR}}/webapp/etc/nginx/log/access.log'
+  MYSQL_SLOW_LOG: '{{.TASKFILE_DIR}}/webapp/etc/mysql/log/slow.log'
+  COMPOSE_FILE: '{{.TASKFILE_DIR}}/webapp/compose.yml'
+
+tasks:
+  default:
+    desc: 利用できるタスクを表示する
+    cmds:
+      - task --list
+
+  check:
+    desc: 解析ツールとCompose設定を確認する
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - alp --version
+      - pt-query-digest --version
+      - docker compose -f webapp/compose.yml config --quiet
+
+  bench:
+    desc: ローカル練習環境を初期化してベンチマークする
+    dir: '{{.TASKFILE_DIR}}/benchmarker'
+    preconditions:
+      - sh: test -x ./bin/benchmarker
+        msg: benchmarker/ で make を実行してベンチマーカーをビルドしてください。
+    cmds:
+      - ./bin/benchmarker -t "http://localhost:80" -u ./userdata
+
+  analyze:
+    desc: nginxとMySQLのログを解析し、結果をlog/に保存する（元ログは保持）
+    dir: '{{.TASKFILE_DIR}}'
+    vars:
+      TIMESTAMP:
+        sh: TZ=Asia/Tokyo date +%Y%m%d-%H%M%S
+    preconditions:
+      - sh: command -v alp
+        msg: alpが必要です。brew install alp で導入してください。
+      - sh: command -v pt-query-digest
+        msg: pt-query-digestが必要です。brew install percona-toolkit で導入してください。
+      - sh: test -r "{{.NGINX_LOG}}" && test -r "{{.MYSQL_SLOW_LOG}}"
+        msg: ログが読み取れません。練習環境を起動し、ログ出力と権限を確認してください。
+    cmds:
+      - |
+        set -e
+        mkdir -p ./log/nginx ./log/mysql
+        alp ltsv --sort sum -r --nosave-pos \
+          --matching-groups='/posts/[0-9]+,/image/[0-9]+,/@[^/?]+' \
+          --file "{{.NGINX_LOG}}" \
+          > "./log/nginx/alp_{{.TIMESTAMP}}.txt"
+        cat "./log/nginx/alp_{{.TIMESTAMP}}.txt"
+        pt-query-digest "{{.MYSQL_SLOW_LOG}}" \
+          > "./log/mysql/digest_{{.TIMESTAMP}}.txt"
+        cat "./log/mysql/digest_{{.TIMESTAMP}}.txt"
+       
+        # Nginx log rotation
+      - |
+        echo
+        echo "===== Rotate Nginx log ====="
+        sudo touch "{{.NGINX_LOG}}"
+        sudo chown 101:101 "{{.NGINX_LOG}}" || true
+        sudo mv "{{.NGINX_LOG}}" \
+          "./webapp/etc/nginx/log/{{.TIMESTAMP}}_access.log"
+        docker compose -f "{{.COMPOSE_FILE}}" exec nginx nginx -s reopen
+
+         # MySQL log rotation
+      - |
+        echo
+        echo "===== Rotate MySQL slow log ====="
+        sudo mv "{{.MYSQL_SLOW_LOG}}" \
+          "./webapp/etc/mysql/log/{{.TIMESTAMP}}_slow.log"
+        docker compose -f "{{.COMPOSE_FILE}}" exec mysql mysqladmin \
+          -uroot -proot flush-logs
+
+  connect-mysql:
+    desc: コンテナ内のMySQLに接続する（パスワードは対話入力）
+    dir: '{{.TASKFILE_DIR}}'
+    interactive: true
+    cmds:
+      - docker compose -f webapp/compose.yml exec mysql mysql -uroot -p isuconp
