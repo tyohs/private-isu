@@ -19,3 +19,6 @@ portal/tmp
 
 # Local profiling results
 /log/
+
+# Generated image files (the database remains the source of truth)
+/webapp/public/image/

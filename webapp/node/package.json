@@ -5,7 +5,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node-dev --respawn src/app.ts",
-    "start": "node dist/app.js"
+    "start": "node dist/app.js",
+    "export-images": "node dist/export-images.js",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "dependencies": {
     "memcached": "^2.2.2",
