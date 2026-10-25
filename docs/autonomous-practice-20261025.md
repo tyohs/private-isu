@@ -522,3 +522,18 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 現行版へ戻すときはREADMEのupを適用し、追加Composeファイルなしでappを起動してnginxをreloadする。Gitの作業ツリーは上記のイメージ切り替えでは変化しない。開始時の既定イメージも `private-isu:profile-before-20261025` に保持した。
 
 次に計測するなら、プロフィールの全件走査は解消済みなので、現行ログで上位へ移った処理から選び直す。今回の最高点を目標に同じ変更を重ねるのではなく、画像・静的ファイル、投稿処理、常時全SQLログの負荷を、専有環境で一つずつ比較する。
+
+
+## 続編3：静的配信・投稿・SQLログの再調査
+
+### 静的ファイルをアプリから外し、画像を条件付き取得する
+
+直近2試行では画像はnginx直配信済みだが、全画像が200で約7.38〜11.24GBを返していた。favicon・CSS・2本のJSもすべてアプリを通り、合計応答時間が約32.1〜39.0秒。セッション用Memcachedアクセスを含む経路を外す候補とした。新しい変更前ベンチ `delivery-baseline` は64,591点、pass=true・fail=0。
+
+`webapp/etc/nginx/conf.d/default.conf` に実在する公開資産の直接配信と `expires 1d` を追加し、既存の正の画像IDの直接配信にも同じ期限を設定した。欠損ファイルは従来のアプリへ渡す。動的HTML、404、画像ID 0には期限を付けない。画像を更新する経路はなく、新規投稿は新しいIDになる。初期化はDELETEでAUTO_INCREMENTを巻き戻さない。将来DB復元等で同じURLの内容を差し替える運用にはキャッシュ無効化の検討が必要。
+
+実HTTPで5種の静的資産と3画像の本文SHA256・MIME・サイズが変更前と一致した。8 URLすべてでCache-Control、ETag、Last-Modifiedを確認し、If-None-MatchとIf-Modified-Sinceがそれぞれ空の304を返した。欠損JS/画像は404、画像ID 0は200空、トップとログインは200で期限なし。画像1のファイルを退避してnginx側の欠損を確認すると、DBから正しいバイト列を返しファイルを再生成した。退避元はfinallyで復元済み。nginx構文検査も成功。reload後の新workerと共有ファイル反映を待って判定する必要があった。
+
+[個人のprivate-isu実践記録](https://tomotakatakahashi.github.io/プログラミング/2024/04/13/isucon-practice.html)で同じ静的資産の負荷とexpires設定を参照した。ただし記事中の試行にはベンチ失敗も含まれるため、正しさは今回のHTTP検証と標準ベンチで判断する。[nginx expires仕様](https://nginx.org/en/docs/http/ngx_http_headers_module.html#expires)と[ETag等の仕様](https://nginx.org/en/docs/http/ngx_http_core_module.html#etag)を確認。ベンチのURLCacheは期限があると条件付きヘッダを付けるが、HTTP要求自体は発生する。ベンチマーカーは変更していない。他言語の公開資産配信処理もコードで照合し、実行検証はNodeのみ。
+
+この変更からrunnerに稼働nginx設定のハッシュ照合と、SQLログ設定・グローバルSQLカウンタの前後保存を追加した。後続試行の結果はこの節へ追記する。
