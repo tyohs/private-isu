@@ -538,7 +538,14 @@ app.get('/posts', async (c: AppContext) => {
     }
     maxCreatedAt = parsed
   }
-  const [postRows] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC', [maxCreatedAt])
+  // Filter hidden authors before limiting, so their posts do not consume page slots.
+  const [postRows] = await db.query<RowDataPacket[]>(
+    'SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` '
+    + 'FROM `posts` AS p INNER JOIN `users` AS u ON u.`id` = p.`user_id` '
+    + 'WHERE p.`created_at` <= ? AND u.`del_flg` = 0 '
+    + 'ORDER BY p.`created_at` DESC LIMIT ?',
+    [maxCreatedAt, POSTS_PER_PAGE]
+  )
   const posts = postRows as Post[]
   const me = await getSessionUser(c)
   const enriched = await makePosts(posts)

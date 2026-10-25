@@ -295,3 +295,21 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 ```
 
 最終構成へ戻すには、追加のComposeファイルを付けずにappを再作成し、nginxをreloadする。試行開始前の元コード `5945894` は `private-isu:prep-before-20261025`、開始時点の既定タグのイメージは `private-isu:pre-autonomous-default-20261025` に保持した。Gitだけを戻してもコンテナは切り替わらない点に注意する。
+
+## 続編: GET /posts の取得上限と残る N+1（2026-10-25）
+
+ユーザーから追加で改善を依頼されたため、同じローカル環境で継続。再開時点は `c4b6a34`、接続数4、テンプレートコンパイルキャッシュ有効。変更前の標準ベンチ `nplus-baseline` は55,754点、pass=true、fail=0。直前の44,429点からも揺れているので、別時刻の最高点だけで改善率を決めない。
+
+### GET /posts の過剰取得
+
+`posts JOIN users` で `del_flg=0` を条件に入れ、その後 `ORDER BY created_at DESC LIMIT 20` を適用する。先に投稿だけを20件へ絞るとBAN済み投稿の分だけ表示が不足する。本文と画像データを全件取得する方式や、ベンチ日時に限定した処理は使わない。
+
+- 実データ16 URL（トップ、5日時の一覧、パラメータなし/空、3プロフィール、公開/非公開/存在しない詳細）を旧版と比較し、HTMLとステータスが全件一致した。
+- 2016-01-02T02:46:40Z の一覧は取得10,000行→20行、同02:40:00Zは9,600行→20行。SQL全体は前者133回→121回。関連データのN+1はこの段階では残す。
+- Docker内のNode 24で17テスト成功。実MySQLのテストでは、最新10投稿がBAN済み、20件未満、日時ちょうど、空の日時、全投稿BAN、同一日時を確認した。
+- テストはランダム名の専用DBへテーブル定義だけを複製し、終了時にそのDBのみ削除する。アプリのデータへは書き込まない。`ISUCONP_INTEGRATION_TEST=1` のときだけ実行し、CREATE/DROP DATABASE権限が必要。通常の `npm test` ではこの統合テストをskipする。
+- 最初に試した `CREATE TEMPORARY TABLE users LIKE users` はMySQLで同名エラーとなった。テスト方法の問題を直し、専用DBで再実行して成功した。失敗も `test-nplus-limit.log` 作成前の会話記録に残る。
+- 同じ `created_at` の相対順は元SQLにも保証がない。SQL仕様として時刻降順・最大20件・BAN除外を維持し、同日時のID順やページ間重複の解消は追加仕様にしていない。MySQLの[ORDER BYとLIMITの注意](https://docs.oracle.com/cd/E17952_01/mysql-9.7-en/limit-optimization.html)を確認した。
+- Ruby/Go/PHP/Pythonの `make_posts` 相当と `/posts` をコードで確認。BAN除外後20件、一覧コメント最新3件、詳細全コメントが共通。日時欠落など元から言語差のある処理はNodeの既存動作を保持し、他言語の実行検証はしていない。
+
+追加で参照した実践記事: [ekusiadadusのprivate-isu実践](https://ekusiadadus.com/ja/blog/private-isu-500k-with-isutools)。GROUP BY・window関数・INによるN+1解消とJOIN+LIMITを試した本人の記録。環境・言語が異なるため点数は転用せず、手元のクエリ回数と応答を判断材料にする。
