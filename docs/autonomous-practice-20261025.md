@@ -672,7 +672,7 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 
 ### 未分類SQLを既知の用途へ分解
 
-開始時HEADは97bac70、作業ツリーはクリーン。稼働版は前回の投稿execute版・キャッシュ/keepalive設定。直前の `upload-prepared-2` のSQLログ169,803文を、値を表示せず用途別に再集計した。従来のother 47,459回・22.924秒は、トップ投稿JOIN 14,908回・6.449秒、ユーザーINSERT 2,419回・4.949秒、初期化5文・4.560秒、コメントINSERT 2,010回・4.245秒、詳細投稿取得10,403回・1.379秒、ログイン/プロフィールユーザー取得15,294回・1.192秒、登録重複確認2,419回・0.165秒に分類できた。合計が従来otherと一致し、用途不明のSQLは残らなかった。初期化と通常負荷を混ぜて優先順位を決めない。
+開始時HEADは97bac70、作業ツリーはクリーン。稼働版は前回の投稿execute版・キャッシュ/keepalive設定。直前の `upload-prepared-2` のSQLログ169,803文を、値を表示せず用途別に再集計した。従来のother 47,459回・22.924秒は、トップ投稿JOIN 14,908回・6.449秒、ユーザーINSERT 2,419回・4.949秒、初期化4文・4.543秒、コメントINSERT 2,010回・4.245秒、詳細投稿取得10,403回・1.379秒、ログイン/プロフィールユーザー取得15,294回・1.192秒、登録重複確認2,419回・0.165秒、画像BLOB取得2回・0.003秒に分類できた。合計が従来otherと一致し、用途不明のSQLは残らなかった。初期化と通常負荷を混ぜて優先順位を決めない。
 
 トップ投稿JOIN平均0.433msだけから、トップHTTP平均4.923msの残りを描画時間とは判断しない。SQLの往復・プール待ち・セッション等も残るため、実アプリでCPUプロファイルと描画の同期実行時間を追加計測した。
 
@@ -683,3 +683,16 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 確認後に静的handlerがファイルを開けない場合にもDB経由で返せるよう、画像locationへ `error_page 404 = @image_app` を追加した。try_filesの通常の欠損分岐に加え、静的配信の404も回復する。[nginx error_page仕様](https://nginx.org/en/docs/http/ngx_http_core_module.html#error_page)に沿う。共有ファイルシステムや並行renameの影響は仮説で、原因や再現条件は未確定。
 
 検査用nginxコンテナで、既存画像URLへrewriteした後に存在しないrootを使って静的handlerの404を意図的に起こした。名前付きlocationからアプリへ渡り、画像1はDBの79,316バイトとSHA256が一致する200、存在しないIDはアプリの404を返した。一時コンテナはfinallyで削除。通常の画像・静的資産・条件付き304・欠損画像復元も実HTTPで成功し、nginx構文検査も成功。アプリ/スキーマ/ベンチマーカーはこの変更では変えていない。全言語が使うnginxの補強だが、実行検証はNodeのみ。
+
+
+### CPU診断とEJSのwithを使わない描画
+
+診断試行 `render-diagnostic` は旧アプリにのみpreload hookを付け、Node inspectorのCPUプロファイル、ejs.renderFileの同期実行時間、fs.existsSync回数を90秒間採った。288,956点・fail=0だが、計測フックの負荷を含むため通常ベンチの得点比較には使わない。診断後に通常起動へ戻した。
+
+トップindex.ejsは12,790回・同期描画合計4,319.704ms・平均0.338ms、一覧posts.ejs平均0.403ms、プロフィール0.288ms、詳細0.087ms。fs.existsSyncは438,707回。CPUサンプルでも_post.ejsとexistsSyncが上位だった。HTTP時間の残りをすべて描画とみなさず、描画自体とinclude探索に絞って改善する。
+
+[EJSの公式オプション](https://ejs.co/docs/#options)と[公開実装](https://api.ejs.co/lib_esm_ejs.js.html)を確認。稼働EJS 6.0.1ではstrict=trueでwithブロックを使わず、destructuredLocalsで裸の変数名を保持できる。共通renderのオプションにstrictと既知の11変数名を追加した。テンプレートの本文・エスケープ関数・HTMLキャッシュ・DB問い合わせには変更を入れない。v6のunsafePrototypeLocalsも有効化していない。
+
+固定20投稿・各3コメントのトップを各1,000回、旧→strict→旧→strictの順で描画。平均0.249→0.135→0.197→0.117msで、全HTMLのSHA256が一致。各回の存在確認24,000回は変わらないため、include探索は別の変更として扱う。ウォームアップとコンパイルは計測外。この補助値を標準ベンチの改善率に置き換えない。
+
+実DBの27 URLでHTML・ステータスがすべて一致。新しい回帰テストは実ハンドラが渡すオプションを取り出し、7画面×未ログイン/一般/管理者×0/1/20投稿の63通りを旧設定と比較する。引用符・HTMLタグ・日本語・改行・CSRF・flash noticeも含める。Dockerの実DB統合を含む28テスト成功、ホストは13成功・実DB統合2skip。Ruby/Go/PHP/Pythonの対応する描画/部品挿入もコードで照合し、今回の変更はNodeの実行方式だけ。他言語の実行検証はしていない。
