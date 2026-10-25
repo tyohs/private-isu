@@ -666,3 +666,20 @@ BENCH_APP_REVISION=7a6e015 python3 log/autonomous-20261025/run-bench.py post-que
 docker compose -f webapp/compose.yml up -d --no-deps --no-build app
 docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 ```
+
+
+## 続編4：トップ描画と未分類SQL
+
+### 未分類SQLを既知の用途へ分解
+
+開始時HEADは97bac70、作業ツリーはクリーン。稼働版は前回の投稿execute版・キャッシュ/keepalive設定。直前の `upload-prepared-2` のSQLログ169,803文を、値を表示せず用途別に再集計した。従来のother 47,459回・22.924秒は、トップ投稿JOIN 14,908回・6.449秒、ユーザーINSERT 2,419回・4.949秒、初期化5文・4.560秒、コメントINSERT 2,010回・4.245秒、詳細投稿取得10,403回・1.379秒、ログイン/プロフィールユーザー取得15,294回・1.192秒、登録重複確認2,419回・0.165秒に分類できた。合計が従来otherと一致し、用途不明のSQLは残らなかった。初期化と通常負荷を混ぜて優先順位を決めない。
+
+トップ投稿JOIN平均0.433msだけから、トップHTTP平均4.923msの残りを描画時間とは判断しない。SQLの往復・プール待ち・セッション等も残るため、実アプリでCPUプロファイルと描画の同期実行時間を追加計測した。
+
+### 変更前に出た画像404とフォールバックの補強
+
+新しい基準試行 `render-baseline` は331,742点だがfail=1。「静的ファイルが正しくありません (GET /image/23530.png)」だったため正常な比較基準から外した。該当URLのアクセスログでは同じ秒にnginx直配信200（940,215バイト）→nginx自身の404（153バイト、upstreamなし）→DB経由200（同サイズ）が記録され、その後は304。レスポンス本文は保存していないため、画像バイト列の破損と断定しない。次の診断試行はfail=0、通常版の再試行 `render-baseline-2` は289,989点・fail=0だった。
+
+確認後に静的handlerがファイルを開けない場合にもDB経由で返せるよう、画像locationへ `error_page 404 = @image_app` を追加した。try_filesの通常の欠損分岐に加え、静的配信の404も回復する。[nginx error_page仕様](https://nginx.org/en/docs/http/ngx_http_core_module.html#error_page)に沿う。共有ファイルシステムや並行renameの影響は仮説で、原因や再現条件は未確定。
+
+検査用nginxコンテナで、既存画像URLへrewriteした後に存在しないrootを使って静的handlerの404を意図的に起こした。名前付きlocationからアプリへ渡り、画像1はDBの79,316バイトとSHA256が一致する200、存在しないIDはアプリの404を返した。一時コンテナはfinallyで削除。通常の画像・静的資産・条件付き304・欠損画像復元も実HTTPで成功し、nginx構文検査も成功。アプリ/スキーマ/ベンチマーカーはこの変更では変えていない。全言語が使うnginxの補強だが、実行検証はNodeのみ。
