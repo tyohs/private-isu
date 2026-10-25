@@ -6,7 +6,15 @@
 
 ローカル環境の標準初期化・再起動・ベンチ反復はユーザーが明示許可した。コメント件数の一括化、投稿詳細の画像BLOB取得省略、標準ライブラリによるハッシュ計算、テンプレートの再利用、DB接続数の比較まで進めた。実測値と検証範囲は末尾の記録を参照。スコアが上がったと確認できない施策も、その事実を残している。
 
-## 現時点の結果（続編2まで反映）
+## 現時点の結果（続編3まで反映）
+
+**画像・静的資産の条件付きキャッシュ、公開資産のnginx直接配信、上流接続の再利用を追加した。** 今回の開始時64,591点に対して、最終構成334,850点、pass=true・fail=0。キャッシュ導入直後に接続枯渇で0点となった試行も含め、全9試行を末尾の「続編3」に記録した。採用後の得点は揺れるため固定の改善率は主張しない。
+
+投稿画像のINSERTだけをバイナリ送信へ変更。専用DBの同じ1MiB画像ではDB受信量がほぼ半減し、全256バイト値・日本語・10MiB境界を含む27テストとnginx越しの実投稿が成功した。ただし投稿変更単独の総合点改善は未確認。全SQLログもON/OFFを2回ずつ比較したが、停止による改善を確認できず、最終状態は有効のまま。
+
+最新の実装は `2346467`（投稿）・`91eb221`（nginx設定整理）。通常Composeの既定イメージにも反映済み。今回の実装4コミットと最終記録コミットをローカルに保存し、pushはしていない。
+
+## 続編2終了時の結果
 
 **プロフィールの本文取得を20件に制限し、全投稿IDの転送をDB内集計へ変更。`posts(user_id,created_at)` の索引を追加した。** 索引追加でトップ・一覧のJOIN順が退行する問題も実測し、投稿を先に読む指定を同時に入れて修正した。
 
@@ -543,7 +551,7 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 
 `delivery-cache-1` はpass=trueだがscore=0・fail=31,828。判定には必ずfailも使う。画像は115,431要求中111,471件が304、返却約0.769GB、静的資産は31,964要求中31,960件が304・本文合計5,331バイト。配信量は減ったが、動的要求が増えるとnginx→appの接続で `connect() ... failed (99: Cannot assign requested address)` が大量発生した。アプリ/MySQLは停止せず、OOMKilled=false。環境の一時ポート範囲は32768〜60999。後からTIME_WAITを数えても負荷ピークを復元できないので、ポート数の厳密なピークは未計測。
 
-以前のproxy_passは接続を再利用しない構成だった。`upstream node_app` にworkerあたり16本のidle keepalive、HTTP/1.1とConnectionヘッダ解除を設定する。Nodeの既定idle timeoutが実環境で5秒なので、nginx側を4秒にする。これは総接続数の上限ではない。[nginx upstream keepalive仕様](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive)に沿って、画像欠損の名前付きlocationと通常locationの両方を同じupstreamへ向ける。nginx設定は他言語にも共通なので、別実装へ切り替える際は上流のidle timeoutも確認する。
+以前のproxy_passは接続再利用を明示していなかった。`upstream node_app` にworkerあたり16本のidle keepalive、HTTP/1.1とConnectionヘッダ解除を設定する。Nodeの既定idle timeoutが実環境で5秒なので、nginx側を4秒にする。これは総接続数の上限ではない。[nginx upstream keepalive仕様](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive)に沿って、画像欠損の名前付きlocationと通常locationの両方を同じupstreamへ向ける。nginx設定は他言語にも共通なので、別実装へ切り替える際は上流のidle timeoutも確認する。
 
 runnerもpass=trueだけで成功扱いしないようfail=0を必須に変更し、巨大なmessages一覧は原本に保存してコンソールへは件数だけを出す。
 
@@ -554,7 +562,7 @@ slow_query_log=1・long_query_time=0・FILE出力・general_log=0の構成を基
 
 | 試行 | 全SQLログ | score | fail | 追加ログ MB（10進） | POST /平均 ms（302と422を合算） |
 | --- | --- | ---: | ---: | ---: | ---: |
-| delivery-keepalive-1 | ON | 314,760 | 0 | 945.834 | 17.057 |
+| delivery-keepalive-1 | ON | 314,760 | 0 | 945.834 | 17.056 |
 | sql-log-off-1 | OFF | 230,613 | 0 | 0 | 24.461 |
 | sql-log-on-2 | ON | 363,426 | 0 | 1,122.187 | 14.364 |
 | sql-log-off-2 | OFF | 357,699 | 0 | 0 | 16.189 |
@@ -587,8 +595,74 @@ docker compose -f webapp/compose.yml exec -T mysql sh -c \
 
 ### 接続再利用の実測と設定の明示
 
-一時HTTPサーバーと、本番と同じnginx設定（listen/upstreamポートのみ検査用に変更）の一時コンテナを使い、上流でConnectionヘッダ・HTTP版・接続元ポートを確認した。nginx 1.30.5ではHTTP/1.1・Connectionヘッダなし、24要求を2接続で処理していた。最初の一時コンテナはLTSV書式定義も必要だったため起動失敗し、共通nginx.confも渡して検証し直した。一時コンテナはfinallyで削除、検査サーバーには自動終了を設定し、標準ベンチ中には動かしていない。
+一時HTTPサーバーと、本番と同じnginx設定（listen/upstreamポートのみ検査用に変更）の一時コンテナを使い、上流でConnectionヘッダ・HTTP版・接続元ポートを確認した。nginx 1.30.5ではHTTP/1.1・Connectionヘッダなし、24要求を2接続で処理していた。一時検査環境の初回起動は失敗した。最終的にはLTSV定義を含む共通nginx.confとdefault.confの両方を渡した環境で検証した。一時コンテナはfinallyで削除、検査サーバーには自動終了を設定し、標準ベンチ中には動かしていない。
 
 設定レビューで、[proxy_set_headerの継承条件](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)は「同じ階層にproxy_set_headerが一つもない場合」と確認した。Hostをlocationに残したままでは親のConnection指定が継承されないため、両方をserver階層に揃えた。現行版の既定値で動いたことだけを根拠に古いnginxへ持ち込まない。修正後も24要求・2接続、本文/条件付き取得/欠損画像復元のHTTP検査とnginx構文検査が成功した。
 
 ホストのnpm testは12成功・実DB統合2skip（明示フラグなし）。実DB検証の成功はDocker側の27テストに基づく。
+
+
+### 続編3の全ベンチ結果と採否
+
+標準ベンチ9回のうち8回がpass=true・fail=0・messages空・終了コード0。残る1回はpass=trueでもfailが31,828・score=0の失敗試行であり、採用判定から除外した。下表には失敗も残す。すべてapp/MySQL各1 CPU・1GiB、接続4本、同じ3本のposts索引。ベンチ中のビルド・テスト・ログ集計・DDLはなく、各試行の前後で索引・ログ設定は一致した。SQL時間の異常値除外は全試行0件。MySQL/Memcached再起動なし、アプリ切り替えとnginx reloadは計測の外で実行した。
+
+POST時間は正しい画像投稿の302だけを集計し、CSRF拒否422と分けた。SQL時間とHTTP時間は測定範囲が異なる。
+
+| 試行 | app照合元 / 設定照合元 | SQLログ | score | fail | 投稿302平均 / P95 ms | INSERT平均 ms |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| delivery-baseline | 0d92498 / 0d92498 | ON | 64,591 | 0 | 65.805 / 186 | 16.897 |
+| delivery-cache-1 | f4b18fa / f4b18fa | ON | 0 | 31,828 | 27.870 / 59 | 12.853 |
+| delivery-keepalive-1 | 7a6e015 / 7a6e015 | ON | 314,760 | 0 | 27.734 / 61 | 12.981 |
+| sql-log-off-1 | 7a6e015 / 7a6e015 | OFF | 230,613 | 0 | 39.148 / 79 | 未計測 |
+| sql-log-on-2 | 7a6e015 / 7a6e015 | ON | 363,426 | 0 | 22.907 / 52 | 11.010 |
+| sql-log-off-2 | 7a6e015 / 7a6e015 | OFF | 357,699 | 0 | 26.135 / 54 | 未計測 |
+| upload-prepared-1 | 2346467 / 2346467 | ON | 363,303 | 0 | 22.015 / 47 | 11.717 |
+| upload-query-control | 7a6e015 / 91eb221 | ON | 346,403 | 0 | 23.615 / 46 | 10.111 |
+| upload-prepared-2 | 91eb221 / 91eb221 | ON | 334,850 | 0 | 22.590 / 46 | 10.214 |
+
+初期のrunnerでapp照合元が独立保存されていない行は、指定コミットのapp.tsと稼働ファイルを照合している。`upload-query-control` では新nginxのまま旧イメージへ戻したため、app=7a6e015・設定=91eb221を別々に保存した。2346467と91eb221のappは同じ。7a6e015と2346467のnginx設定も同じで、91eb221ではヘッダ宣言の階層を整理した。ヘッダと接続再利用の実測は整理前後で同じだった。
+
+- **静的配信・キャッシュ・接続再利用を採用。** 開始時の静的資産は10,600要求すべてapp経由・本文14,127,150バイト。最終は56,904要求すべてnginx直配信・本文5,331バイト。画像は33,122要求・約10.34GBから、201,847要求・約1.304GBへ変わり、195,593件が304だった。要求数が違うので同一件数の総量比較ではないが、本文を返さず検証できた効果はHTTP状態とハッシュの両方で確認した。最終の画像2要求はDBフォールバック経由で、欠損時の経路も残る。静的資産を同URLで更新する運用へ変える場合はURLの版付け等も考える。
+- **投稿INSERTのexecuteを転送量削減として採用。** 固定画像の受信量・保存バイト列に基づく。最終構成のCom_stmt_execute増分979は成功投稿979件と一致し、prepareは4回だけ。キャッシュ後query版の363,426/346,403点、execute版の363,303/334,850点は範囲が重なる。INSERTのサーバー内時間も約10〜12msで明確に短くなっていない。成功投稿HTTPはqueryの22.907/23.615ms、executeの22.015/22.590msだったが、これを得点改善の証明にはしない。旧処理へ戻した方が最後の得点は高かったことも保持する。
+- **全SQLログの停止は不採用。** 約1GB/回の記録を省ける一方、この環境の得点改善は確認できなかった。最終はslow_query_log=1・long_query_time=0・general_log=0・FILE。新しいボトルネックを調べるための観測を維持する。raw SQLには画像や認証情報等が含まれ得るため、生ログはGit管理外のまま扱う。
+
+最終のGET平均/P95はトップ4.923/12ms、日時指定一覧7.045/17ms、プロフィール7.479/18ms、詳細4.253/11ms。POST /成功は22.590/46ms、CSRF拒否は6.403/14ms。最終ログの既知分類では画像INSERT累積9.999秒、最新コメントの一括取得7.508秒、件数一括取得2.900秒。未分類SQLも残るので、これだけでSQL全体の順位を断定しない。次の調査では、トップHTMLの累積73.387秒の内訳、投稿のBLOB保存/ファイル書き込み/待ち時間、未分類SQLを分けることが候補になる。まだ測っていない内訳をボトルネックと断定しない。
+
+### ISUCON15へ持ち帰る運用の知見
+
+1. **キャッシュを入れたら次の資源制約を見る。** 配信量が減ると動的要求が増え、今回は内部TCP接続で502になった。1試行の得点だけで終えず、エラーログ、接続の再利用、上流のidle timeoutまで確認する。HTTP上のkeepaliveとDBプールは別の設定。
+2. **成功判定をベンチのpass一つにしない。** 今回はpass=true・score=0・fail>0が実際に出た。CI等へ移すならpass、fail、終了コード、得点、messagesを保存して判定する。失敗試行も残し、最高点だけを掲載しない。
+3. **稼働状態をGit SHAと組にする。** appのソース/生成JS/イメージ、nginx設定、実DB索引、MySQL版、SQLログのON/OFFを保存する。アプリだけを切り戻す比較では設定の照合元とappの照合元を別に持つ。通常起動のイメージタグまで最終構成へ戻して確認する。
+4. **ログのコストは独立した変更として測る。** slow log OFFはSQL時間がゼロになることではなく、未観測になること。Questionsや受信量、HTTP、設定の前後一致を併記する。長時間の全SQLログと、短い調査区間の使い分けは専有環境でも再計測する。
+5. **ドライバやバージョンの違いを調べる。** Nodeのquery/executeはBLOBの送信表現が違い、nginxの既定keepalive動作やヘッダ継承にも条件がある。別言語の記事の設定値をそのまま移さず、同じ入力のバイト列と実通信で確かめる。
+6. **実験全体を直列化し、復元まで完了させる。** ベンチ中のビルド/解析/デプロイを避ける。将来のCIではデプロイ→初期化→負荷→ログ保存→復元の排他も一体にする。現行の補助runnerはベンチをflockで排他し、デプロイ等は手動でその外に直列配置した。CI/CD、Webhook、AGENTS.md、Skillsの本番用実装は今回まだ作っていない。
+
+### 続編3終了時の状態と再実行
+
+- 実装は `f4b18fa` 静的配信/条件付きキャッシュ、`7a6e015` 上流接続再利用、`2346467` 投稿のバイナリ送信、`91eb221` ヘッダ設定の階層整理。各コミットに当時の検証・知見を含め、全試行の最終結果を記録コミットへ保存する。
+- 既定 `private-isu-app:latest` は `private-isu:upload-prepared-20261025` と同じ。イメージIDは `sha256:053d5d3e7f0a6e3c45cbcbc19ecc932e08a9914e7d192f881fb703ae50a4e9b5`。実コンテナとローカルのapp.ts/dist/app.js、nginx両設定のSHA256一致を確認。起動は `node dist/app.js`、プロファイラなし。
+- 4サービス稼働・OOMなし、nginx構文検査成功、トップ200・20投稿。DB索引は続編2の最終状態と一致。SQLログはONへ復元し、設定の永続ファイルは変更していない。
+- Dockerの実DB統合を含む27テスト成功。ホストは12成功・実DB統合2skip。3 MIMEの実HTTP投稿と静的資産/画像の本文一致、304、404、欠損画像復元を確認。他言語はコード照合のみで実行未検証。
+- 原本はGit管理外の `log/autonomous-20261025/`。今回の9試行のmetadata/stdout/ログ範囲、`delivery-post-logging-results.json`、`post-protocol.json`、HTTP検査JSON、ビルド/テストログ、`upstream-probe-before.json`/`after.json`、`final-delivery-post-state.json` を保存。追加ログはファイルのバイト範囲で切り出し、元ログの削除/ローテートはしていない。
+- DB再インポート、既存索引の変更、ベンチマーカー変更、外部送信、push、ISUCON15リポジトリの変更はしていない。標準ベンチの初期化により一時HTTP投稿用アカウント/投稿/画像も削除済み。
+
+現行構成の再計測例。以下はこのMacに残るGit管理外runnerを使い、標準初期化を伴う。未使用の試行名に変える。91eb221は最終記録コミット以前でも実行コード・nginx設定が現行と同じ。
+
+```sh
+cd /Users/yk/Documents/private/isu-con/private-isu
+python3 log/autonomous-20261025/run-bench.py delivery-repeat-1 91eb221
+```
+
+投稿だけ旧query版へ一時的に戻す場合。nginxとDB索引は最終構成を使う。次のCompose補助ファイルと旧イメージもこのMacのGit管理外保存物。
+
+```sh
+cd /Users/yk/Documents/private/isu-con/private-isu
+docker compose -f webapp/compose.yml \
+  -f log/autonomous-20261025/compose-upload-query-control.yml up -d --no-deps --no-build app
+docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
+# HTTPの起動完了を確認してから実行。
+BENCH_APP_REVISION=7a6e015 python3 log/autonomous-20261025/run-bench.py post-query-repeat-1 91eb221
+# 現行のexecute版へ復元。
+docker compose -f webapp/compose.yml up -d --no-deps --no-build app
+docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
+```
