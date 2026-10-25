@@ -546,3 +546,38 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 以前のproxy_passは接続を再利用しない構成だった。`upstream node_app` にworkerあたり16本のidle keepalive、HTTP/1.1とConnectionヘッダ解除を設定する。Nodeの既定idle timeoutが実環境で5秒なので、nginx側を4秒にする。これは総接続数の上限ではない。[nginx upstream keepalive仕様](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive)に沿って、画像欠損の名前付きlocationと通常locationの両方を同じupstreamへ向ける。nginx設定は他言語にも共通なので、別実装へ切り替える際は上流のidle timeoutも確認する。
 
 runnerもpass=trueだけで成功扱いしないようfail=0を必須に変更し、巨大なmessages一覧は原本に保存してコンソールへは件数だけを出す。
+
+
+### 全SQLログの負荷を単独比較
+
+slow_query_log=1・long_query_time=0・FILE出力・general_log=0の構成を基準に、同じアプリ/索引/nginxで `SET GLOBAL slow_query_log = OFF/ON` だけを順番に切り替えた。MySQL再起動やプール再接続はしていない。OFFでもlong_query_time自体は0のままで、グローバルな記録の有効/無効だけが変わる。各計測前後の設定一致も検査した。
+
+| 試行 | 全SQLログ | score | fail | 追加ログ MB（10進） | POST /平均 ms（302と422を合算） |
+| --- | --- | ---: | ---: | ---: | ---: |
+| delivery-keepalive-1 | ON | 314,760 | 0 | 945.834 | 17.057 |
+| sql-log-off-1 | OFF | 230,613 | 0 | 0 | 24.461 |
+| sql-log-on-2 | ON | 363,426 | 0 | 1,122.187 | 14.364 |
+| sql-log-off-2 | OFF | 357,699 | 0 | 0 | 16.189 |
+
+OFFではログ増加が0になった一方、Questionsは120,241/189,374増加し、実際にDB処理していた。Slow_queriesカウンタもOFF中に増えるため「ログへ書いた件数」の代用にしない。OFF時のSQL時間は未計測であり、0秒として比較しない。ONのログ量は1ベンチ約0.95〜1.12GB。採取・複製・解析もディスクを消費するため短い調査区間を区切る意義はあるが、今回の2組では停止による得点改善を確認できなかった。最終構成ではログ有効を維持する。Macの他処理とCPU/メモリを共有し、試行の変動を分離できていないので、ONの方が速いとも結論しない。
+
+[MySQLのslow log仕様](https://dev.mysql.com/doc/refman/9.7/en/slow-query-log.html)では動的切り替えが可能で、SQL完了とロック解放後にログへ書く。Query_timeの合計だけからログ出力の負荷を推定しない。稼働状態を含めてON/OFFを測る。次回の切り替え例は以下。ベンチ停止中に実行し、ON/OFFを同一試行中に混ぜない。
+
+```sh
+cd /Users/yk/Documents/private/isu-con/private-isu
+docker compose -f webapp/compose.yml exec -T mysql sh -c \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot isuconp -e "SET GLOBAL slow_query_log = OFF"'
+# 対象試行を計測。終了後は次で調査用に戻す。
+docker compose -f webapp/compose.yml exec -T mysql sh -c \
+  'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot isuconp -e "SET GLOBAL slow_query_log = ON"'
+```
+
+### 投稿画像のINSERTだけをバイナリプロトコルへ変更
+
+キャッシュ/keepalive後も投稿INSERTは909〜1,058回、平均約11〜13ms。`mysql2` のqueryはBufferを16進SQL文字列へ展開する。一方、[mysql2のPrepared Statements仕様](https://github.com/sidorares/node-mysql2/blob/master/website/docs/documentation/prepared-statements.mdx)にあるexecuteはパラメータを送信し、同一SQLのprepare結果を接続ごとに再利用する。初回prepareの往復は増えるため、全SQLを一律に変更せず、画像BLOBを含む投稿INSERTの1か所に限定した。DBへの画像保存、原子的ファイル書き込み、失敗時のDBフォールバックは従来どおり。
+
+専用DBで1MiBの全256バイト値を繰り返す画像をquery→execute→query→executeの順に各8回保存した。ウォームアップは各回の計測外。受信量はqueryで各16,778,634バイト、executeで各8,389,338バイト。8保存の経過時間はquery 129.059/115.295ms、execute 71.963/64.554ms。保存後のBLOBも一致した。この補助計測はslow log OFF・標準ベンチ外で実施し、後でONへ戻した。固定1接続・1MiBの結果であり、その比率を標準ベンチの改善率に置き換えない。
+
+`webapp/node/test/upload.integration.test.mjs` はランダム名の専用DBと一時ディレクトリへ限定して、実ハンドラ→実MySQL→実ファイル書き込みを通す。JPEG/PNG/GIFの全256バイト、NUL/日本語/絵文字/引用符/バックスラッシュを含む本文、10MiBちょうどの保存、上限超過・未指定・非対応MIME・不正CSRF・未認証の保存拒否、ファイル書き込み失敗後のDB画像取得を確認した。10MiB境界はアプリハンドラへの直接リクエストの検証で、nginxのmultipart全体の10m制限は別に残る。独立DBは最後に削除する。従来分を含むDockerの27テスト成功。
+
+さらに稼働Composeのnginx越しに一時アカウントを作成し、3 MIMEの画像を実投稿。リダイレクト先の本文、画像全バイト、Content-Type、キャッシュ期限、304を確認した。一時アカウント/投稿/画像は次の標準ベンチの初期化で除去する。新規依存、DBスキーマ、ベンチマーカーの変更はない。標準ベンチでの比較結果は後述する。
