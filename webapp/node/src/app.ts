@@ -307,7 +307,7 @@ async function render(c: AppContext, view: string, params: RenderParams): Promis
   const session = c.get('session') as SessionData
   const messages = { notice: session.flashNotice }
   session.flashNotice = undefined
-  const html = await ejs.renderFile(path.join(__dirname, '../views', view), { ...params, messages, formatBody })
+  const html = await ejs.renderFile(path.join(__dirname, '../views', view), { ...params, messages, formatBody }, { cache: true })
   return c.html(html)
 }
 

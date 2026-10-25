@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mock, test } from 'node:test'
+import ejs from 'ejs'
 
 let fetchApp
 let posts = []
@@ -61,3 +62,28 @@ for (const counts of [[], [0], [7], Array.from({ length: 20 }, (_, i) => i % 5)]
     assert.equal(queries.length, 1 + (counts.length ? 1 : 0) + counts.length + Number(counts.some(Boolean)))
   })
 }
+
+test('compiled templates are reused while post and comment contents stay fresh', async () => {
+  ejs.clearCache()
+  const compile = mock.method(ejs, 'compile')
+  try {
+    posts = [{ ...author, id: 1, user_id: author.id, body: 'before_body', mime: 'image/png',
+      post_created_at: created, user_created_at: created }]
+    comments = [{ id: 1, post_id: 1, user_id: author.id, comment: 'before_comment', created_at: created }]
+    const before = await (await fetchApp(new Request('http://localhost/'))).text()
+    const compiled = compile.mock.callCount()
+    assert.ok(compiled > 0)
+    assert.match(before, /before_body/)
+    assert.match(before, /before_comment/)
+    posts[0].body = 'after_body'
+    comments[0].comment = 'after_comment'
+    const after = await (await fetchApp(new Request('http://localhost/'))).text()
+    assert.equal(compile.mock.callCount(), compiled)
+    assert.match(after, /after_body/)
+    assert.match(after, /after_comment/)
+    assert.doesNotMatch(after, /before_body|before_comment/)
+  } finally {
+    compile.mock.restore()
+    ejs.clearCache()
+  }
+})
