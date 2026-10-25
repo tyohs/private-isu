@@ -438,3 +438,19 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 [HowTelevisionの実践記録](https://zenn.dev/howtelevision/articles/74a33ec0e327c0)と[stefafafanの実践記録](https://blog.stenyan.jp/entry/2022/07/18/224212)を参照。どちらにも投稿者・日時の複合索引や索引選択を調べた経緯がある。記事で使われたFORCE INDEXをそのまま追加せず、現行MySQLでの計画から判断する。
 
 [MySQL 9.7の複合索引](https://dev.mysql.com/doc/refman/9.7/en/multiple-column-indexes.html)と[ORDER BY最適化](https://dev.mysql.com/doc/refman/9.7/en/order-by-optimization.html)を確認。`(user_id, created_at)` は左端のuser_idだけでも検索でき、user_id固定時の日時順取得にも使える候補となる。user_id単独と複合の重複索引を両方常設する方針にはしない。
+
+取得上限版 `8e83643`・索引なしの標準ベンチ `profile-bounded-1` は37,212点、pass=true、fail=0。プロフィール平均は基準18.482ms→37.508ms、投稿取得SQL平均4.612ms→11.473msだった。調査行数はどちらも1要求あたり約1万行。総合点の変動だけでなく当該SQLの悪化も確認したため、索引なしの取得上限版を最終構成にはしない。
+
+### 複合索引と、別クエリへの退行対策
+
+`webapp/migrations/20261025_posts_user_created_at.up.sql` に `posts(user_id,created_at)` の非一意索引を追加するSQL、対応するdownにその索引だけを削除するSQLを保存。既存日時索引は残す。初期問題のダンプや `/initialize` へ自動適用せず、READMEの手順で明示実行する。up/downは `ALGORITHM=INPLACE, LOCK=NONE`、実行時はメタデータロック待ちを10秒に制限した。
+
+索引を実DBへ追加したところ、プロフィールは12投稿への索引検索となり、投稿数・被コメント数の集計もカバリング索引を利用した。一方、トップと一覧がユーザー→投稿の順に変わり、全公開投稿を集めてソートした。観測したトップは9,951投稿、日時指定一覧は9,790投稿をソートし、約10.9ms・8.57msかかった。参照したstefafafanの記事と同系統の、索引追加による別クエリの退行を現行環境でも実測した。
+
+このため索引追加と同じ変更単位で、Nodeのトップと `/posts` を `STRAIGHT_JOIN` にし、投稿を先に読むよう指定する。[MySQLのJOIN仕様](https://dev.mysql.com/doc/refman/9.7/en/join.html)に従う。トップの従来LEFT JOINは `WHERE u.del_flg=0` によりユーザーのない投稿を除外しており、この変更でも同じ結果になる。索引名をコードで強制するFORCE INDEXは使わない。
+
+- 修正後はトップが日時索引から20投稿、一覧は22投稿を調べて公開20件で停止。プロフィールは複合索引で対象ユーザーだけを取得する。
+- 索引だけの段階は27 URL中25件がHTML一致。最新日時を扱うトップ・未来日時の一覧で同時刻の順序/選択が変わった。結合順を修正すると27件すべて旧版HTML・ステータスと一致した。索引だけの状態は標準ベンチを回さず、計画の退行を直してから比較する。
+- 索引を含む実テーブル定義を複製した独立DBで22テスト成功。500投稿のケースを含む。新しい索引の存在だけを確認して採用するのではなく、他経路の計画とHTMLも確認した。
+- 索引は他言語からの検索にも影響し得るが、今回の結合順修正・ベンチ実行はNodeのみ。他言語へ運用を切り替える際は、そのSQLの実行計画を再確認する必要がある。
+- ベンチrunnerは開始/終了時に実DBの索引定義・MySQLバージョンを保存し、計測中に索引が変化していないことを検証するよう補強。GitコミットだけではDB状態を識別できないため、今回以降のmetadataには両方を残す。

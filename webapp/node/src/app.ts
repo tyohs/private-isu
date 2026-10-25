@@ -431,11 +431,13 @@ app.get('/', async (c: AppContext) => {
   try {
     const me = await getSessionUser(c)
 
+    // Keep the timeline driven by newest posts; a user-first join can collect
+    // and sort every visible post after the profile's user_id index is added.
     const [postUsers] = await db.query<RowDataPacket[]>(
       'SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at` as post_created_at, p.`mime`, '
       + 'u.`account_name`, u.`passhash`, u.`authority`, u.`del_flg`, u.`created_at`as user_created_at '
       + 'FROM `posts`as p '
-      + 'LEFT JOIN `users` as u '
+      + 'STRAIGHT_JOIN `users` as u '
       + 'ON p.`user_id` = u.`id` '
       + 'WHERE u.`del_flg` = 0 '
       + 'ORDER BY p.`created_at` DESC '
@@ -508,10 +510,10 @@ app.get('/posts', async (c: AppContext) => {
     }
     maxCreatedAt = parsed
   }
-  // Filter hidden authors before limiting, so their posts do not consume page slots.
+  // Scan posts in date order and filter hidden authors before filling the page.
   const [postRows] = await db.query<RowDataPacket[]>(
     'SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` '
-    + 'FROM `posts` AS p INNER JOIN `users` AS u ON u.`id` = p.`user_id` '
+    + 'FROM `posts` AS p STRAIGHT_JOIN `users` AS u ON u.`id` = p.`user_id` '
     + 'WHERE p.`created_at` <= ? AND u.`del_flg` = 0 '
     + 'ORDER BY p.`created_at` DESC LIMIT ?',
     [maxCreatedAt, POSTS_PER_PAGE]
