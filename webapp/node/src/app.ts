@@ -454,12 +454,18 @@ app.get('/', async (c: AppContext) => {
       + 'LIMIT 20'
     )
 
+    const commentCounts = new Map<number, number>()
+    if (postUsers.length > 0) {
+      const [countRows] = await db.query<RowDataPacket[]>(
+        'SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`',
+        [postUsers.map((row) => row.id)]
+      )
+      for (const row of countRows) commentCounts.set(row.post_id, row.count)
+    }
+
     let enriched: Post[] = []
     for (const row of postUsers) {
-      const [[commentRows], [[commentCount]]] = await Promise.all([
-        db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id]),
-        db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [row.id])
-      ])
+      const [commentRows] = await db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id])
 
       const post: Post = {
         id: row.id,
@@ -468,7 +474,7 @@ app.get('/', async (c: AppContext) => {
         body: row.body,
         mime: row.mime,
         created_at: row.post_created_at,
-        comment_count: (commentCount as CountRow | undefined)?.count || 0,
+        comment_count: commentCounts.get(row.id) ?? 0,
         comments: (commentRows as Comment[]).reverse(),
         user: {
           id: row.user_id,
