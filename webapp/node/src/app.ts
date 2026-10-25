@@ -312,6 +312,7 @@ async function render(c: AppContext, view: string, params: RenderParams): Promis
   session.flashNotice = undefined
   const html = await ejs.renderFile(path.join(__dirname, '../views', view), { ...params, messages, formatBody }, {
     cache: true,
+    root: path.join(__dirname, '../views'),
     strict: true,
     // Bind the known view data directly instead of resolving it through with().
     destructuredLocals: ['me', 'messages', 'formatBody', 'imageUrl', 'posts', 'post',

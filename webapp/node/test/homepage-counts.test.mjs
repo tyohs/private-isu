@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mock, test } from 'node:test'
 import ejs from 'ejs'
 import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
 
 let fetchApp
 let posts = []
@@ -124,4 +125,23 @@ test('all page templates preserve HTML, escaping and session data with the appli
       }
     }
   } finally { ejs.clearCache() }
+})
+
+test('warm homepage includes do not check the filesystem on every post', async () => {
+  posts = Array.from({ length: 20 }, (_, i) => ({
+    ...author, id: i + 1, user_id: author.id, body: `post${i}`, mime: 'image/png',
+    post_created_at: created, user_created_at: created
+  }))
+  comments = []
+  await fetchApp(new Request('http://localhost/'))
+  const exists = mock.method(fs, 'existsSync')
+  try {
+    for (let i = 0; i < 2; i++) {
+      const response = await fetchApp(new Request('http://localhost/'))
+      const html = await response.text()
+      assert.equal(response.status, 200, html)
+      assert.equal([...html.matchAll(/class="isu-post" id="pid_/g)].length, 20)
+    }
+    assert.equal(exists.mock.callCount(), 0)
+  } finally { exists.mock.restore(); ejs.clearCache() }
 })
