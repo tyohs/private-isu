@@ -581,3 +581,14 @@ docker compose -f webapp/compose.yml exec -T mysql sh -c \
 `webapp/node/test/upload.integration.test.mjs` はランダム名の専用DBと一時ディレクトリへ限定して、実ハンドラ→実MySQL→実ファイル書き込みを通す。JPEG/PNG/GIFの全256バイト、NUL/日本語/絵文字/引用符/バックスラッシュを含む本文、10MiBちょうどの保存、上限超過・未指定・非対応MIME・不正CSRF・未認証の保存拒否、ファイル書き込み失敗後のDB画像取得を確認した。10MiB境界はアプリハンドラへの直接リクエストの検証で、nginxのmultipart全体の10m制限は別に残る。独立DBは最後に削除する。従来分を含むDockerの27テスト成功。
 
 さらに稼働Composeのnginx越しに一時アカウントを作成し、3 MIMEの画像を実投稿。リダイレクト先の本文、画像全バイト、Content-Type、キャッシュ期限、304を確認した。一時アカウント/投稿/画像は次の標準ベンチの初期化で除去する。新規依存、DBスキーマ、ベンチマーカーの変更はない。標準ベンチでの比較結果は後述する。
+
+
+投稿execute版の最初の標準ベンチ `upload-prepared-1` は363,303点、pass=true・fail=0。直近query版ONの363,426点とほぼ同じ。INSERTは1,076回、Com_stmt_executeも1,076増加し、prepareは3回だけだった。SQL平均11.717ms、POST /の302/422合算平均13.732ms。ログ増加768.954MB、DB受信618.408MB。query版の直近ONはINSERT 1,058回、平均11.010ms、ログ1,122.187MB、DB受信1,087.970MB。画像サイズや他SQL件数も異なるため、ログや受信量の比率だけを固定画像の削減率と解釈しない。点数への寄与はまだ未確定なので、同じ最終nginx設定でqueryへ戻す比較を行う。
+
+### 接続再利用の実測と設定の明示
+
+一時HTTPサーバーと、本番と同じnginx設定（listen/upstreamポートのみ検査用に変更）の一時コンテナを使い、上流でConnectionヘッダ・HTTP版・接続元ポートを確認した。nginx 1.30.5ではHTTP/1.1・Connectionヘッダなし、24要求を2接続で処理していた。最初の一時コンテナはLTSV書式定義も必要だったため起動失敗し、共通nginx.confも渡して検証し直した。一時コンテナはfinallyで削除、検査サーバーには自動終了を設定し、標準ベンチ中には動かしていない。
+
+設定レビューで、[proxy_set_headerの継承条件](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)は「同じ階層にproxy_set_headerが一つもない場合」と確認した。Hostをlocationに残したままでは親のConnection指定が継承されないため、両方をserver階層に揃えた。現行版の既定値で動いたことだけを根拠に古いnginxへ持ち込まない。修正後も24要求・2接続、本文/条件付き取得/欠損画像復元のHTTP検査とnginx構文検査が成功した。
+
+ホストのnpm testは12成功・実DB統合2skip（明示フラグなし）。実DB検証の成功はDocker側の27テストに基づく。
