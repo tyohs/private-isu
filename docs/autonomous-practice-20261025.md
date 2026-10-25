@@ -185,3 +185,11 @@ Skillsへ切り出す候補は、今回のような手順を何度か成功さ�
 基準試行の `SELECT * FROM posts WHERE id = ?` は1,589回、SQL累積約3.06秒。`views/_post.ejs` と `imageUrl` は画像のIDとMIMEだけを使い、BLOB本体は画像配信の別経路で取得する。したがって投稿詳細のSELECTを `id, user_id, body, mime, created_at` に絞った。`/image`、画像保存、DB構造には変更を加えない。
 
 同じ実DBで13ケースのHTTPステータスとHTMLが変更前後で完全一致した。JPEG/PNG/GIF、BAN済み投稿、存在しないID、全コメント表示を含む。Docker内のビルド・既存9テストも成功。個別検証は `log/autonomous-20261025/check-detail.mjs` と `detail-before.json` / `detail-after.json` に保存。
+
+`95c1f8e` の標準ベンチは31,172点、pass・fail 0・messages空。直前31,524点との差は約-1.1%で、点数の改善は確認できない。SQL上位から画像BLOBを含む投稿取得が消えたことは確認した。転送削減を保ちつつ、アプリ側の待ちを次に調べる。
+
+### ハッシュ計算の外部プロセスをなくす
+
+`digest` はシェル・OpenSSL・sedを同期起動し、ログイン/登録ごとに2回呼ばれる。Node標準の `crypto.createHash('sha512').update(src, 'utf8').digest('hex')` へ置換する。二重SHA-512の連結形式、salt、保存形式は変更しない。Go/Ruby/PHP/Pythonのsaltと連結方法も確認した。UTF-8入力とhex出力の仕様は [Node.js 24のCrypto仕様](https://nodejs.org/docs/latest-v24.x/api/crypto.html#hashupdatedata-inputencoding) と照合した。
+
+変更前の外部コマンド版と変更後の両方で、OpenSSLから別途作った期待ハッシュによるログインを確認した。英数字、引用符・シェル記号、日本語・絵文字・改行、空文字、4KiB文字列、誤パスワード、存在しないユーザー、登録直後のログインを含む。DBはモックで、実ハンドラ・セッション処理を通す。Dockerでビルドと11テスト成功。新たな依存は追加していない。
