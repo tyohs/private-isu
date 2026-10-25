@@ -537,3 +537,12 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 [個人のprivate-isu実践記録](https://tomotakatakahashi.github.io/プログラミング/2024/04/13/isucon-practice.html)で同じ静的資産の負荷とexpires設定を参照した。ただし記事中の試行にはベンチ失敗も含まれるため、正しさは今回のHTTP検証と標準ベンチで判断する。[nginx expires仕様](https://nginx.org/en/docs/http/ngx_http_headers_module.html#expires)と[ETag等の仕様](https://nginx.org/en/docs/http/ngx_http_core_module.html#etag)を確認。ベンチのURLCacheは期限があると条件付きヘッダを付けるが、HTTP要求自体は発生する。ベンチマーカーは変更していない。他言語の公開資産配信処理もコードで照合し、実行検証はNodeのみ。
 
 この変更からrunnerに稼働nginx設定のハッシュ照合と、SQLログ設定・グローバルSQLカウンタの前後保存を追加した。後続試行の結果はこの節へ追記する。
+
+
+### キャッシュで負荷が移り、内部TCP接続が枯渇した
+
+`delivery-cache-1` はpass=trueだがscore=0・fail=31,828。判定には必ずfailも使う。画像は115,431要求中111,471件が304、返却約0.769GB、静的資産は31,964要求中31,960件が304・本文合計5,331バイト。配信量は減ったが、動的要求が増えるとnginx→appの接続で `connect() ... failed (99: Cannot assign requested address)` が大量発生した。アプリ/MySQLは停止せず、OOMKilled=false。環境の一時ポート範囲は32768〜60999。後からTIME_WAITを数えても負荷ピークを復元できないので、ポート数の厳密なピークは未計測。
+
+以前のproxy_passは接続を再利用しない構成だった。`upstream node_app` にworkerあたり16本のidle keepalive、HTTP/1.1とConnectionヘッダ解除を設定する。Nodeの既定idle timeoutが実環境で5秒なので、nginx側を4秒にする。これは総接続数の上限ではない。[nginx upstream keepalive仕様](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive)に沿って、画像欠損の名前付きlocationと通常locationの両方を同じupstreamへ向ける。nginx設定は他言語にも共通なので、別実装へ切り替える際は上流のidle timeoutも確認する。
+
+runnerもpass=trueだけで成功扱いしないようfail=0を必須に変更し、巨大なmessages一覧は原本に保存してコンソールへは件数だけを出す。
