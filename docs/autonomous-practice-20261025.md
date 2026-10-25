@@ -418,3 +418,23 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 現行版へ戻すには、上記の追加Composeファイルを付けずに `up -d --no-deps --no-build app` を実行してnginxをreloadする。続編開始前のイメージも `private-isu:nplus-before-20261025` に保持した。Gitの切り替えだけでは稼働コンテナは変わらない。
 
 次の候補はプロフィールの投稿全件取得・全投稿ID取得と `posts(user_id)` の索引、常時全SQLログの負担、総合点に残る画像・投稿経路。プロフィールのコメントと作者のN+1は今回解消したが、表示する投稿をSQL段階で20件へ制限する変更や集計SQLの書き換えは別の仮説として残した。本番前には専有環境で点数の再現性も確認する。
+
+## 続編2: プロフィールの取得上限と投稿者索引（2026-10-25）
+
+ユーザーの追加依頼で、開始コミット `308788b` から継続。実DBのpostsにはPRIMARYと `idx_posts_created_at(created_at)` のみ存在し、user_idを先頭に持つ索引はなかった。開始時の投稿者数は1,000、投稿数はユーザーごとに平均10.247・最大22件。標準ベンチ `profile-baseline` は56,730点、pass=true、fail=0。
+
+### プロフィールの過剰取得
+
+表示用の本文などは `WHERE user_id = ? ORDER BY created_at DESC LIMIT 20` に制限。全投稿IDの配列をNodeへ返す処理を廃止し、投稿数は `COUNT(*)`、被コメント数は `comments JOIN posts ON posts.id = comments.post_id WHERE posts.user_id = ?` で集計する。ページ外の投稿・コメントも総数に含め、コメントした人のBAN状態を条件に追加しない。
+
+- 実データ27 URL（従来16件＋投稿数上位10プロフィール＋存在しないプロフィール）でHTMLとHTTPステータスが全件一致。
+- 実データの21投稿ユーザーでは表示用取得21→20行、ID取得21行→集計結果1行に縮小。
+- Dockerで22テスト成功。専用DBの500投稿ユーザーは表示用20行・投稿総数500・ページ外を含む被コメント数2で、総数を表示件数に取り違えていないことを確認。投稿0件・1件・20件超、同時刻、非公開/存在しないユーザーも検証。
+- Ruby/Go/PHP/Pythonのプロフィール処理もコードで照合し、表示上限と全件集計の意味を保持。他言語の実行検証はしていない。
+- ただし索引なしのEXPLAIN ANALYZEでは、旧SQLはテーブル走査10,243行→ユーザーの12行をソート、新SQLは日時索引の逆向き走査10,243行→12行となった。観測時間も約1.87ms→4.16ms。返却件数が少なくても、該当ユーザーの投稿が20件未満なら全件探索が残る。このためLIMITだけで高速化したとは判断せず、索引を別の変更として検証する。
+
+### 参考資料と索引の仮説
+
+[HowTelevisionの実践記録](https://zenn.dev/howtelevision/articles/74a33ec0e327c0)と[stefafafanの実践記録](https://blog.stenyan.jp/entry/2022/07/18/224212)を参照。どちらにも投稿者・日時の複合索引や索引選択を調べた経緯がある。記事で使われたFORCE INDEXをそのまま追加せず、現行MySQLでの計画から判断する。
+
+[MySQL 9.7の複合索引](https://dev.mysql.com/doc/refman/9.7/en/multiple-column-indexes.html)と[ORDER BY最適化](https://dev.mysql.com/doc/refman/9.7/en/order-by-optimization.html)を確認。`(user_id, created_at)` は左端のuser_idだけでも検索でき、user_id固定時の日時順取得にも使える候補となる。user_id単独と複合の重複索引を両方常設する方針にはしない。
