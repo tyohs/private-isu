@@ -469,7 +469,7 @@ app.get('/', async (c: AppContext) => {
         mime: row.mime,
         created_at: row.post_created_at,
         comment_count: (commentCount as CountRow | undefined)?.count || 0,
-        comments: (await Promise.all((commentRows as Comment[]).map(makeComment))).reverse(),
+        comments: (commentRows as Comment[]).reverse(),
         user: {
           id: row.user_id,
           account_name: row.account_name,
@@ -481,6 +481,18 @@ app.get('/', async (c: AppContext) => {
       }
       enriched.push(post)
     }
+
+    const commentUserIds = [...new Set(enriched.flatMap((post) => (post.comments ?? []).map((comment) => comment.user_id)))]
+    if (commentUserIds.length > 0) {
+      const [userRows] = await db.query<RowDataPacket[]>('SELECT * FROM `users` WHERE `id` IN (?)', [commentUserIds])
+      const usersById = new Map((userRows as User[]).map((user) => [user.id, user]))
+      for (const post of enriched) {
+        for (const comment of post.comments ?? []) {
+          comment.user = usersById.get(comment.user_id)
+        }
+      }
+    }
+
     return render(c, 'index.ejs', { posts: enriched, me, imageUrl })
   } catch (e) {
     console.error(e)
