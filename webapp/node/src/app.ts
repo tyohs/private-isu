@@ -556,7 +556,7 @@ app.post('/', async (c: AppContext) => {
     return c.redirect('/')
   }
   const buffer = Buffer.from(await file.arrayBuffer())
-  const [result] = await db.query<ResultSetHeader>('INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)', [me.id, mime, buffer, ensureString(body.body)])
+  const [result] = await db.execute<ResultSetHeader>('INSERT INTO `posts` (`user_id`, `mime`, `imgdata`, `body`) VALUES (?,?,?,?)', [me.id, mime, buffer, ensureString(body.body)])
   const insertId = result.insertId
   try {
     await writeImage(insertId, mime, buffer)
