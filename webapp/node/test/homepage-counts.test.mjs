@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { mock, test } from 'node:test'
 import ejs from 'ejs'
+import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
 
 let fetchApp
 let posts = []
@@ -86,4 +88,60 @@ test('compiled templates are reused while post and comment contents stay fresh',
     compile.mock.restore()
     ejs.clearCache()
   }
+})
+
+test('all page templates preserve HTML, escaping and session data with the application render options', async () => {
+  posts = []
+  comments = []
+  const renderFile = mock.method(ejs, 'renderFile')
+  let applicationData, options
+  try {
+    const response = await fetchApp(new Request('http://localhost/'))
+    assert.equal(response.status, 200)
+    const args = renderFile.mock.calls[0].arguments
+    applicationData = args[1]
+    options = args[2]
+  } finally { renderFile.mock.restore() }
+  const user = { ...author, account_name: 'writer<&\"\'日本語🚀', csrfToken: 'csrf-\"<&token' }
+  const post = {
+    id: 1, user_id: user.id, body: '本文<&\"\'\r\n次の行\nlast', mime: 'image/png', created_at: created,
+    user, comment_count: 7,
+    comments: [{ id: 1, user_id: user.id, post_id: 1, user, created_at: created, comment: '<script>alert(1)</script>&\"\'' }]
+  }
+  try {
+    for (const authority of [undefined, 0, 1]) {
+      for (const count of [0, 1, 20]) {
+        const data = { ...applicationData, messages: { notice: 'notice<&\"\'' },
+          me: authority === undefined ? undefined : { ...user, authority }, user, users: [user], post,
+          posts: Array.from({ length: count }, (_, i) => ({ ...post, id: i + 1 })),
+          post_count: 500, comment_count: 21, commented_count: 81 }
+        for (const view of ['index', 'posts', 'post', 'user', 'login', 'register', 'banned']) {
+          const filename = fileURLToPath(new URL(`../views/${view}.ejs`, import.meta.url))
+          const expected = await ejs.renderFile(filename, data, { cache: false, root: options.root })
+          const actual = await ejs.renderFile(filename, data, options)
+          assert.equal(actual, expected, `${view}: authority=${authority}, posts=${count}`)
+          assert.doesNotMatch(actual, /<script>alert\(1\)<\/script>/)
+        }
+      }
+    }
+  } finally { ejs.clearCache() }
+})
+
+test('warm homepage includes do not check the filesystem on every post', async () => {
+  posts = Array.from({ length: 20 }, (_, i) => ({
+    ...author, id: i + 1, user_id: author.id, body: `post${i}`, mime: 'image/png',
+    post_created_at: created, user_created_at: created
+  }))
+  comments = []
+  await fetchApp(new Request('http://localhost/'))
+  const exists = mock.method(fs, 'existsSync')
+  try {
+    for (let i = 0; i < 2; i++) {
+      const response = await fetchApp(new Request('http://localhost/'))
+      const html = await response.text()
+      assert.equal(response.status, 200, html)
+      assert.equal([...html.matchAll(/class="isu-post" id="pid_/g)].length, 20)
+    }
+    assert.equal(exists.mock.callCount(), 0)
+  } finally { exists.mock.restore(); ejs.clearCache() }
 })

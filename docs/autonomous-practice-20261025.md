@@ -6,7 +6,17 @@
 
 ローカル環境の標準初期化・再起動・ベンチ反復はユーザーが明示許可した。コメント件数の一括化、投稿詳細の画像BLOB取得省略、標準ライブラリによるハッシュ計算、テンプレートの再利用、DB接続数の比較まで進めた。実測値と検証範囲は末尾の記録を参照。スコアが上がったと確認できない施策も、その事実を残している。
 
-## 現時点の結果（続編3まで反映）
+## 現時点の結果（続編4まで反映）
+
+**トップの描画を調べ、EJSのwithを使わない設定と、viewsルートからのinclude解決を追加した。** 固定入力の描画時間を短縮し、20投稿のトップに残っていたファイル存在確認を24回/描画→0回にした。Dockerの29テスト、実データ27 URLのHTML・ステータス比較が成功。
+
+今回の正常基準289,989点、最終312,669点・fail=0。同じ最終nginx設定で旧描画へ戻すと248,420点、改善版の2回は257,319/312,669点。変動があり、総合点の安定した改善率は未確定。失敗1回と診断1回を含む全7試行を末尾「続編4」に残した。
+
+従来の未分類SQL 47,459回・22.924秒も用途別に分類した。初期化を通常負荷から分け、残りを描画時間と取り違えずCPU診断で確認。基準試行で画像の静的404を1件観測したため、DBフォールバックも補強した。発生原因は未確定だが、静的404を意図的に起こすHTTP検証では回復した。
+
+最新の実装は `dd6a505`（画像404）、`09aec1b`（withを使わない描画）、`db6c92c`（include探索削減）。通常Composeへ反映済み。今回の実装3コミットと最終記録コミットをローカルに保存し、pushはしていない。
+
+## 続編3終了時の結果
 
 **画像・静的資産の条件付きキャッシュ、公開資産のnginx直接配信、上流接続の再利用を追加した。** 今回の開始時64,591点に対して、最終構成334,850点、pass=true・fail=0。キャッシュ導入直後に接続枯渇で0点となった試行も含め、全9試行を末尾の「続編3」に記録した。採用後の得点は揺れるため固定の改善率は主張しない。
 
@@ -672,7 +682,7 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 
 ### 未分類SQLを既知の用途へ分解
 
-開始時HEADは97bac70、作業ツリーはクリーン。稼働版は前回の投稿execute版・キャッシュ/keepalive設定。直前の `upload-prepared-2` のSQLログ169,803文を、値を表示せず用途別に再集計した。従来のother 47,459回・22.924秒は、トップ投稿JOIN 14,908回・6.449秒、ユーザーINSERT 2,419回・4.949秒、初期化5文・4.560秒、コメントINSERT 2,010回・4.245秒、詳細投稿取得10,403回・1.379秒、ログイン/プロフィールユーザー取得15,294回・1.192秒、登録重複確認2,419回・0.165秒に分類できた。合計が従来otherと一致し、用途不明のSQLは残らなかった。初期化と通常負荷を混ぜて優先順位を決めない。
+開始時HEADは97bac70、作業ツリーはクリーン。稼働版は前回の投稿execute版・キャッシュ/keepalive設定。直前の `upload-prepared-2` のSQLログ169,803文を、値を表示せず用途別に再集計した。従来のother 47,459回・22.924秒は、トップ投稿JOIN 14,908回・6.449秒、ユーザーINSERT 2,419回・4.949秒、初期化4文・4.543秒、コメントINSERT 2,010回・4.245秒、詳細投稿取得10,403回・1.379秒、ログイン/プロフィールユーザー取得15,294回・1.192秒、登録重複確認2,419回・0.165秒、画像BLOB取得2回・0.003秒に分類できた。合計が従来otherと一致し、用途不明のSQLは残らなかった。初期化と通常負荷を混ぜて優先順位を決めない。
 
 トップ投稿JOIN平均0.433msだけから、トップHTTP平均4.923msの残りを描画時間とは判断しない。SQLの往復・プール待ち・セッション等も残るため、実アプリでCPUプロファイルと描画の同期実行時間を追加計測した。
 
@@ -683,3 +693,91 @@ docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
 確認後に静的handlerがファイルを開けない場合にもDB経由で返せるよう、画像locationへ `error_page 404 = @image_app` を追加した。try_filesの通常の欠損分岐に加え、静的配信の404も回復する。[nginx error_page仕様](https://nginx.org/en/docs/http/ngx_http_core_module.html#error_page)に沿う。共有ファイルシステムや並行renameの影響は仮説で、原因や再現条件は未確定。
 
 検査用nginxコンテナで、既存画像URLへrewriteした後に存在しないrootを使って静的handlerの404を意図的に起こした。名前付きlocationからアプリへ渡り、画像1はDBの79,316バイトとSHA256が一致する200、存在しないIDはアプリの404を返した。一時コンテナはfinallyで削除。通常の画像・静的資産・条件付き304・欠損画像復元も実HTTPで成功し、nginx構文検査も成功。アプリ/スキーマ/ベンチマーカーはこの変更では変えていない。全言語が使うnginxの補強だが、実行検証はNodeのみ。
+
+
+### CPU診断とEJSのwithを使わない描画
+
+診断試行 `render-diagnostic` は旧アプリにのみpreload hookを付け、Node inspectorのCPUプロファイル、ejs.renderFileの同期実行時間、fs.existsSync回数を90秒間採った。288,956点・fail=0だが、計測フックの負荷を含むため通常ベンチの得点比較には使わない。診断後に通常起動へ戻した。
+
+トップindex.ejsは12,790回・同期描画合計4,319.704ms・平均0.338ms、一覧posts.ejs平均0.403ms、プロフィール0.288ms、詳細0.087ms。fs.existsSyncは438,707回。CPUサンプルでも_post.ejsとexistsSyncが上位だった。HTTP時間の残りをすべて描画とみなさず、描画自体とinclude探索に絞って改善する。
+
+[EJSの公式オプション](https://ejs.co/docs/#options)と[公開実装](https://api.ejs.co/lib_esm_ejs.js.html)を確認。稼働EJS 6.0.1ではstrict=trueでwithブロックを使わず、destructuredLocalsで裸の変数名を保持できる。共通renderのオプションにstrictと既知の11変数名を追加した。テンプレートの本文・エスケープ関数・HTMLキャッシュ・DB問い合わせには変更を入れない。v6のunsafePrototypeLocalsも有効化していない。
+
+固定20投稿・各3コメントのトップを各1,000回、旧→strict→旧→strictの順で描画。平均0.249→0.135→0.197→0.117msで、全HTMLのSHA256が一致。各回の存在確認24,000回は変わらないため、include探索は別の変更として扱う。ウォームアップとコンパイルは計測外。この補助値を標準ベンチの改善率に置き換えない。
+
+実DBの27 URLでHTML・ステータスがすべて一致。新しい回帰テストは実ハンドラが渡すオプションを取り出し、7画面×未ログイン/一般/管理者×0/1/20投稿の63通りを旧設定と比較する。引用符・HTMLタグ・日本語・改行・CSRF・flash noticeも含める。Dockerの実DB統合を含む28テスト成功、ホストは13成功・実DB統合2skip。Ruby/Go/PHP/Pythonの対応する描画/部品挿入もコードで照合し、今回の変更はNodeの実行方式だけ。他言語の実行検証はしていない。
+
+
+strict版の標準試行 `render-strict-1` は292,425点、fail=0。正常基準289,989点と得点差は小さい。トップ平均/P95は6.038/15ms→4.911/11ms、一覧8.745/20ms→6.946/15ms。画像404の補強はstrict版から入っているため、最初の正常基準とはnginx設定も異なる。最終的にはnginxを固定した旧appへの切り戻しでも比較する。
+
+### include先をviewsルート基準にする
+
+稼働EJSのgetIncludePathは相対名ごとにfs.existsSyncを呼び、cache=trueでも省略しない。文字列のrootと先頭/のあるincludeなら、既知のrootからパスを解決し、この存在確認を経由しない。[EJSのinclude仕様](https://ejs.co/docs/#path-resolution-and-filename)とインストール済み6.0.1のコードで確認した。共通renderにviewsディレクトリをrootとして渡し、Nodeの8テンプレートのinclude名を `/header.ejs` 等へ揃えた。HTMLの空白、組み立て、エスケープ、CSRFの渡し方は変えていない。アプリのルートURLやOSルートを変更する設定ではない。
+
+相対include版とroot版を別プロセスで各1,000描画すると、存在確認は24,000→0だったが、平均時間は相対0.157/0.106ms、root0.181/0.121msで速くならなかった。追加の同一プロセス比較では、1,000回ウォームアップ後に各5,000回を相対→root→相対→rootの順で実行。平均0.116→0.150→0.105→0.094ms、存在確認120,000→0→120,000→0、全HTMLのSHA256は一致。初回と後半で時間の傾向が異なり、補助値だけで固定の高速化率は出さない。検査用テンプレートの一時ディレクトリは最後に削除した。
+
+実ハンドラを通す回帰テストに、20投稿のトップをウォーム後に2回描画してfs.existsSyncが0回であることを追加。全7画面の63条件、更新後の本文/コメント反映、実DBを含むDocker29テストが成功。ホストは14成功・実DB統合2skip。変更前後の実データ27 URLでもHTML・ステータスがすべて一致した。ベンチrunnerもapp.tsだけでなく全viewsのハッシュ、生成JSのハッシュと起動コマンドを保存するよう補強。テンプレートが比較対象のコミットと違うイメージを測らない。
+
+
+### 続編4の全計測結果と判断
+
+通常ベンチ6回と診断ベンチ1回。最初の通常試行だけ画像1件でfail=1、以後の通常5回と診断1回はpass=true・fail=0・messages空・終了コード0。診断試行は計測フック付きなので得点の前後比較から外す。app/MySQL各1 CPU・1GiB、接続4本、実DB索引は続編3と同じ。全SQLログON・long_query_time=0を維持した。すべての試行で開始/終了の索引とログ設定が一致し、SQL時間の異常値除外は0件。
+
+| 試行 | app / 設定照合元 | score | fail | トップ平均 / P95 ms | 一覧平均 / P95 ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| render-baseline | 97bac70 / 97bac70 | 331,742 | 1 | 4.957 / 12 | 7.261 / 17 |
+| render-diagnostic（診断） | 97bac70 / 97bac70 | 288,956 | 0 | 5.789 / 14 | 8.033 / 20 |
+| render-baseline-2 | 97bac70 / 97bac70 | 289,989 | 0 | 6.038 / 15 | 8.745 / 20 |
+| render-strict-1 | 09aec1b / 09aec1b | 292,425 | 0 | 4.911 / 11 | 6.946 / 15 |
+| render-root-1 | db6c92c / db6c92c | 257,319 | 0 | 5.892 / 15 | 8.191 / 20 |
+| render-old-control | 97bac70 / db6c92c | 248,420 | 0 | 6.786 / 16 | 9.737 / 24 |
+| render-root-2 | db6c92c / db6c92c | 312,669 | 0 | 4.651 / 10 | 6.508 / 14 |
+
+`render-strict-1` から画像静的404のフォールバック設定を含む。`render-root-1` → `render-old-control` → `render-root-2` はnginxを同じ最終設定に固定し、アプリ/テンプレートだけを改善版→旧版→改善版へ切り替えた。旧版は最初の正常基準よりも得点が低く、改善版の2試行にも差がある。Macの他処理とのCPU/メモリ共有などを分離していないため、最高点や最後の1組だけから固定の改善率を算出しない。
+
+**withを使わない描画とinclude探索削減を採用。** 採用根拠は、固定入力でのwith省略の描画短縮、繰り返す存在確認の除去、旧版HTMLとの一致、実DBテストとベンチの正しさ。rootだけの描画時間改善は補助計測でも安定していない。トップ平均は正常基準6.038ms、旧描画の切り戻し6.786ms、最終4.651msとなったが、HTML描画自体の時間とHTTP全体の時間を同一視しない。
+
+最終のプロフィール平均/P95は7.534/15ms、詳細3.942/9ms。最終SQLは画像投稿INSERT956回・11.259秒、最新コメント一括取得19,943回・11.131秒、トップ投稿JOIN14,395回・5.038秒、ユーザーINSERT2,432回・5.004秒、コメントINSERT1,989回・4.206秒。従来otherに隠れていたものも分けて読めるようになった。今回はSQLやDB索引は変更していない。
+
+**画像静的404のDBフォールバックも採用。** 補強後の通常4試行はすべてfail=0。これは原因を確定した証拠や、まれな不具合が完全に消えた証明ではない。観測できた404から正しいDB応答へ回復する経路を、意図的な静的404と既存画像/欠損画像のHTTP検査で確認したものとして記録する。
+
+### 今回から持ち帰ること
+
+1. **HTTP時間からSQL時間を引いて描画時間を作らない。** 未分類SQLには初期化や別ルートのINSERTもあった。用途別分類、CPUプロファイル、描画区間の直接計測を組み合わせて対象を絞る。
+2. **コンパイルのキャッシュとinclude解決は別。** cache=trueでも相対includeの存在確認は残った。実装の分岐と実呼出し数で確かめる。標準root/strictオプションを使い、独自テンプレートエンジンやHTML断片キャッシュの導入はしなかった。
+3. **オプション変更時のキャッシュに注意する。** EJSのキャッシュはfilenameがキー。違うオプションのコンパイル結果を同一プロセスで混ぜない。今回は再ビルド/再起動し、回帰比較の旧設定側はcache=falseにした。新しいビュー変数を増やすときはdestructuredLocalsの11変数の一覧も更新する必要がある。includeはviewsルートからのパスで指定する。
+4. **探索回数削減、固定入力の時間、全体得点を区別する。** 存在確認0回は再現できても、1,000/5,000描画の時間やベンチ得点は揺れた。遅かった値と失敗を残し、旧版へ戻す比較を併記する。
+5. **画像の「内容不一致」はHTTP状態も追う。** 今回は該当URLにnginxの404が含まれていた。DBのBLOB破損やファイルシステムの不具合と即断せず、実際に取れた証拠と仮説を分ける。try_filesの判定後に失敗する経路も考える。
+6. **テンプレートも稼働版の照合対象に入れる。** app.tsのSHAが同じでもviewsが違えば同じ実験ではない。runnerで全11テンプレートのSHAと実行コマンド/生成JSを保存するようにした。診断プロセスを通常ベンチへ混ぜず、最後はプロファイラなしの通常Composeに戻した。
+
+次回の候補は、現在上位の画像INSERT/最新コメント取得の内訳や、表示に使わないユーザー列の転送量。CPUについても描画変更後のプロファイルで再選定する。今回の旧版CPUプロファイルだけで、変更後も同じ処理が上位だとは断定しない。
+
+### 続編4終了時の状態と再実行
+
+- 通常Composeの既定 `private-isu-app:latest` は `private-isu:render-root-20261025` と同じ。イメージIDは `sha256:6ec7d73fbe5e974113c6eabbf11760617cc6ad3ca49e65c2c088520fb8b26a6b`。
+- 実装コミットはdd6a505・09aec1b・db6c92c。最終計測のapp/設定照合元はdb6c92cで、後続の記録コミットは実行コードを変更しない。旧版イメージは `private-isu:render-before-20261025`、strictのみの版は `private-isu:render-strict-20261025` に保持した。
+- 稼働src/app.ts、dist/app.js、11テンプレート、nginxの2設定の計15ファイルがローカルとSHA256一致。4サービス稼働、OOMなし、nginx構文検査成功、トップ200・20投稿。appはnode dist/app.js、プロファイラなし。app/MySQLの資源制限とDB索引・全SQLログ設定も照合した。
+- Docker29テスト成功、ホスト14成功・実DB統合2skip。strict変更とinclude変更でそれぞれ実DB27 URLのHTML・ステータスが一致。7画面の63条件、最新内容、CSRF/flash/エスケープ、20投稿の存在確認0回を回帰検証に含めた。他言語の実行検証は未実施。
+- 原本はGit管理外の `log/autonomous-20261025/`。今回の7試行のmetadata/stdout/ログ範囲、`render-results.json`、`render-*-routes.json`、`render-diagnostic.cpuprofile`、`render-diagnostic-metrics.json`、`render-cpu-summary.json`、`render-micro-*.json`、`render-include-controlled.json`、`sql-previous-other-breakdown.json`、各試行の `sql-classified.json`、`image-static404-http.json`、`final-render-state.json` 等を保持。生SQLやHTML、プロファイル、補助スクリプトはコミットしない。
+- 初期化は標準ベンチに含む。MySQL/Memcachedの再起動、DB再インポート、索引変更、元ログの消去/ローテート、ベンチマーカー変更、push、外部送信、ISUCON15側の変更はしていない。負荷中のビルド・テスト・解析は行わず、反映と復元を直列化した。
+
+現行版の再計測。このMacのGit管理外runnerを使い、標準初期化を伴う。試行名は未使用のものに変える。
+
+```sh
+cd /Users/yk/Documents/private/isu-con/private-isu
+python3 log/autonomous-20261025/run-bench.py render-repeat-1 db6c92c
+```
+
+nginxの画像404補強を維持して、描画だけ旧版へ戻す例。補助Composeファイルと旧イメージもこのMacに保持している。
+
+```sh
+cd /Users/yk/Documents/private/isu-con/private-isu
+docker compose -f webapp/compose.yml \
+  -f log/autonomous-20261025/compose-render-control.yml up -d --no-deps --no-build app
+docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
+# HTTPの起動完了を確認してから実行。
+BENCH_APP_REVISION=97bac70 python3 log/autonomous-20261025/run-bench.py render-control-repeat-1 db6c92c
+# 最終構成へ復元。
+docker compose -f webapp/compose.yml up -d --no-deps --no-build app
+docker compose -f webapp/compose.yml exec -T nginx nginx -s reload
+```

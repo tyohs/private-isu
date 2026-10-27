@@ -1,4 +1,4 @@
-<%- include('header.ejs') %>
+<%- include('/header.ejs') %>
 <div class="isu-submit">
   <form method="post" action="/" enctype="multipart/form-data">
     <div class="isu-form">
@@ -17,10 +17,10 @@
   </form>
 </div>
 
-<%- include('posts.ejs', { posts: posts }) %>
+<%- include('/posts.ejs', { posts: posts }) %>
 
 <div id="isu-post-more">
   <button id="isu-post-more-btn">もっと見る</button>
   <img class="isu-loading-icon" src="/img/ajax-loader.gif">
 </div>
-<%- include('footer.ejs') %>
+<%- include('/footer.ejs') %>
