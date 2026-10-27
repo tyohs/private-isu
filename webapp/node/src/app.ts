@@ -72,10 +72,6 @@ interface CountRow {
   count: number
 }
 
-interface IdRow {
-  id: number
-}
-
 interface SessionData {
   userId?: number
   csrfToken?: string
@@ -435,11 +431,13 @@ app.get('/', async (c: AppContext) => {
   try {
     const me = await getSessionUser(c)
 
+    // Keep the timeline driven by newest posts; a user-first join can collect
+    // and sort every visible post after the profile's user_id index is added.
     const [postUsers] = await db.query<RowDataPacket[]>(
       'SELECT p.`id`, p.`user_id`, p.`body`, p.`created_at` as post_created_at, p.`mime`, '
       + 'u.`account_name`, u.`passhash`, u.`authority`, u.`del_flg`, u.`created_at`as user_created_at '
       + 'FROM `posts`as p '
-      + 'LEFT JOIN `users` as u '
+      + 'STRAIGHT_JOIN `users` as u '
       + 'ON p.`user_id` = u.`id` '
       + 'WHERE u.`del_flg` = 0 '
       + 'ORDER BY p.`created_at` DESC '
@@ -477,16 +475,21 @@ app.get('/:accountName{@[A-Za-z0-9_]+}', async (c: AppContext) => {
     const [urows] = await db.query<RowDataPacket[]>('SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0', [accountName])
     const user = urows[0] as User
     if (!user) return c.text('not_found', 404)
-    const [postRowData] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC', [user.id])
-    const posts = await makePosts((postRowData as Post[]).slice(0, POSTS_PER_PAGE).map((post) => ({ ...post, user })))
+    const [postRowData] = await db.query<RowDataPacket[]>(
+      'SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC LIMIT ?',
+      [user.id, POSTS_PER_PAGE]
+    )
+    const posts = await makePosts((postRowData as Post[]).map((post) => ({ ...post, user })))
     const [commentCountRows] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?', [user.id])
     const commentCount = (commentCountRows[0] as CountRow | undefined)?.count ?? 0
-    const [postIdRows] = await db.query<RowDataPacket[]>('SELECT `id` FROM `posts` WHERE `user_id` = ?', [user.id])
-    const postIds = (postIdRows as IdRow[]).map((r) => r.id)
-    const postCount = postIds.length
+    const [[postCountRow]] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?', [user.id])
+    const postCount = (postCountRow as CountRow).count
     let commentedCount = 0
     if (postCount > 0) {
-      const [countRows] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN (?)', [postIds])
+      const [countRows] = await db.query<RowDataPacket[]>(
+        'SELECT COUNT(*) AS count FROM `comments` AS c INNER JOIN `posts` AS p ON p.`id` = c.`post_id` WHERE p.`user_id` = ?',
+        [user.id]
+      )
       commentedCount = (countRows[0] as CountRow | undefined)?.count ?? 0
     }
     const me = await getSessionUser(c)
@@ -507,10 +510,10 @@ app.get('/posts', async (c: AppContext) => {
     }
     maxCreatedAt = parsed
   }
-  // Filter hidden authors before limiting, so their posts do not consume page slots.
+  // Scan posts in date order and filter hidden authors before filling the page.
   const [postRows] = await db.query<RowDataPacket[]>(
     'SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` '
-    + 'FROM `posts` AS p INNER JOIN `users` AS u ON u.`id` = p.`user_id` '
+    + 'FROM `posts` AS p STRAIGHT_JOIN `users` AS u ON u.`id` = p.`user_id` '
     + 'WHERE p.`created_at` <= ? AND u.`del_flg` = 0 '
     + 'ORDER BY p.`created_at` DESC LIMIT ?',
     [maxCreatedAt, POSTS_PER_PAGE]

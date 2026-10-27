@@ -18,7 +18,7 @@ mock.module('mysql2/promise', {
     createPool: () => ({
       async query(sql, args) {
         queries.push({ sql, args })
-        if (sql.includes('LEFT JOIN `users`')) return [structuredClone(posts)]
+        if (sql.includes('as post_created_at')) return [structuredClone(posts)]
         if (sql.includes('GROUP BY `post_id`')) {
           // Reverse DB row order to ensure counts are matched by ID, not position.
           return [args[0].toReversed().flatMap((id) => {
