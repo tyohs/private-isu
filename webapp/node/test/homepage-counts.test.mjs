@@ -27,7 +27,7 @@ mock.module('mysql2/promise', {
           })]
         }
         if (sql.includes('FROM `comments`') && sql.includes('LIMIT 3')) {
-          return [structuredClone(comments.filter((comment) => comment.post_id === args[0]).slice(-3).reverse())]
+          return [structuredClone(args.flatMap((id) => comments.filter((comment) => comment.post_id === id).slice(-3).reverse()))]
         }
         if (sql.includes('FROM `users`') && sql.includes('IN (?)')) return [[author]]
         throw new Error(`Unexpected query: ${sql}`)
@@ -59,7 +59,7 @@ for (const counts of [[], [0], [7], Array.from({ length: 20 }, (_, i) => i % 5)]
     const grouped = queries.filter(({ sql }) => sql.includes('GROUP BY `post_id`'))
     assert.equal(grouped.length, counts.length ? 1 : 0)
     if (counts.length) assert.deepEqual(grouped[0].args, [posts.map(({ id }) => id)])
-    assert.equal(queries.length, 1 + (counts.length ? 1 : 0) + counts.length + Number(counts.some(Boolean)))
+    assert.equal(queries.length, 1 + (counts.length ? 2 : 0) + Number(counts.some(Boolean)))
   })
 }
 

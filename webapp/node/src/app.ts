@@ -238,11 +238,6 @@ async function tryLogin(accountName: string, password: string): Promise<User | u
   return undefined
 }
 
-async function getUser(userId: number) {
-  const [rows] = await db.query<RowDataPacket[]>('SELECT * FROM `users` WHERE `id` = ?', [userId])
-  return rows[0] as User
-}
-
 async function dbInitialize(): Promise<void> {
   const sqls = [
     'DELETE FROM users WHERE id > 1000',
@@ -270,37 +265,49 @@ function imageUrl(post: Pick<Post, 'id' | 'mime'>): string {
   return `/image/${post.id}${ext}`
 }
 
-async function makeComment(comment: Comment): Promise<Comment> {
-  comment.user = await getUser(comment.user_id)
-  return comment
-}
-
-async function makePost(post: Post, options: CommentOptions = {}): Promise<Post> {
-  const [[countRow]] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [post.id])
-  post.comment_count = (countRow as CountRow | undefined)?.count || 0
-  let query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC'
+async function makePosts(posts: Post[], options: CommentOptions = {}): Promise<Post[]> {
+  const authorIds = [...new Set(posts.filter((post) => !post.user).map((post) => post.user_id))]
+  if (authorIds.length > 0) {
+    const [rows] = await db.query<RowDataPacket[]>('SELECT * FROM `users` WHERE `id` IN (?)', [authorIds])
+    const authors = new Map((rows as User[]).map((user) => [user.id, user]))
+    for (const post of posts) post.user ??= authors.get(post.user_id)
+  }
+  const visible = posts.filter((post) => post.user?.del_flg === 0).slice(0, POSTS_PER_PAGE)
+  if (visible.length === 0) return []
+  const postIds = visible.map((post) => post.id)
+  const counts = new Map<number, number>()
   if (!options.allComments) {
-    query += ' LIMIT 3'
+    const [rows] = await db.query<RowDataPacket[]>(
+      'SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`', [postIds]
+    )
+    for (const row of rows) counts.set(row.post_id, row.count)
   }
-  const [commentRows] = await db.query<RowDataPacket[]>(query, [post.id])
-  const comments = await Promise.all((commentRows as Comment[]).map(makeComment))
-  post.comments = comments.reverse()
-  post.user = await getUser(post.user_id)
-  return post
-}
 
-async function makePosts(posts: Post[], options: { allComments?: boolean } = {}): Promise<Post[]> {
-  const built: Post[] = []
-  for (const post of posts) {
-    const enriched = await makePost(post, options)
-    if (enriched.user && enriched.user.del_flg === 0) {
-      built.push(enriched)
-    }
-    if (built.length >= POSTS_PER_PAGE) {
-      break
+  // Each branch retains the indexed LIMIT 3; do not fetch every comment and
+  // discard the surplus in JavaScript. The outer ORDER BY orders UNION results.
+  const commentQuery = options.allComments
+    ? 'SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `post_id`, `created_at` DESC'
+    : postIds.map(() => '(SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3)')
+      .join(' UNION ALL ') + ' ORDER BY `post_id`, `created_at` DESC'
+  const [rows] = await db.query<RowDataPacket[]>(commentQuery, options.allComments ? [postIds] : postIds)
+  const comments = rows as Comment[]
+  const commentUserIds = [...new Set(comments.map((comment) => comment.user_id))]
+  const commentsByPost = new Map<number, Comment[]>()
+  if (commentUserIds.length > 0) {
+    const [userRows] = await db.query<RowDataPacket[]>('SELECT * FROM `users` WHERE `id` IN (?)', [commentUserIds])
+    const users = new Map((userRows as User[]).map((user) => [user.id, user]))
+    for (const comment of comments) {
+      comment.user = users.get(comment.user_id)
+      const group = commentsByPost.get(comment.post_id) ?? []
+      group.push(comment)
+      commentsByPost.set(comment.post_id, group)
     }
   }
-  return built
+  for (const post of visible) {
+    post.comments = (commentsByPost.get(post.id) ?? []).reverse()
+    post.comment_count = options.allComments ? post.comments.length : counts.get(post.id) ?? 0
+  }
+  return visible
 }
 
 async function render(c: AppContext, view: string, params: RenderParams): Promise<Response> {
@@ -439,50 +446,23 @@ app.get('/', async (c: AppContext) => {
       + 'LIMIT 20'
     )
 
-    const commentCounts = new Map<number, number>()
-    if (postUsers.length > 0) {
-      const [countRows] = await db.query<RowDataPacket[]>(
-        'SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`',
-        [postUsers.map((row) => row.id)]
-      )
-      for (const row of countRows) commentCounts.set(row.post_id, row.count)
-    }
-
-    let enriched: Post[] = []
-    for (const row of postUsers) {
-      const [commentRows] = await db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id])
-
-      const post: Post = {
-        id: row.id,
-        user_id: row.user_id,
-        imgdata: Buffer.alloc(0),
-        body: row.body,
-        mime: row.mime,
-        created_at: row.post_created_at,
-        comment_count: commentCounts.get(row.id) ?? 0,
-        comments: (commentRows as Comment[]).reverse(),
-        user: {
-          id: row.user_id,
-          account_name: row.account_name,
-          passhash: row.passhash,
-          authority: row.authority,
-          del_flg: row.del_flg,
-          created_at: row.user_created_at
-        }
+    const posts: Post[] = postUsers.map((row) => ({
+      id: row.id,
+      user_id: row.user_id,
+      imgdata: Buffer.alloc(0),
+      body: row.body,
+      mime: row.mime,
+      created_at: row.post_created_at,
+      user: {
+        id: row.user_id,
+        account_name: row.account_name,
+        passhash: row.passhash,
+        authority: row.authority,
+        del_flg: row.del_flg,
+        created_at: row.user_created_at
       }
-      enriched.push(post)
-    }
-
-    const commentUserIds = [...new Set(enriched.flatMap((post) => (post.comments ?? []).map((comment) => comment.user_id)))]
-    if (commentUserIds.length > 0) {
-      const [userRows] = await db.query<RowDataPacket[]>('SELECT * FROM `users` WHERE `id` IN (?)', [commentUserIds])
-      const usersById = new Map((userRows as User[]).map((user) => [user.id, user]))
-      for (const post of enriched) {
-        for (const comment of post.comments ?? []) {
-          comment.user = usersById.get(comment.user_id)
-        }
-      }
-    }
+    }))
+    const enriched = await makePosts(posts)
 
     return render(c, 'index.ejs', { posts: enriched, me, imageUrl })
   } catch (e) {
@@ -498,18 +478,7 @@ app.get('/:accountName{@[A-Za-z0-9_]+}', async (c: AppContext) => {
     const user = urows[0] as User
     if (!user) return c.text('not_found', 404)
     const [postRowData] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC', [user.id])
-    const posts: Post[] = []
-    for (const row of (postRowData as Post[]).slice(0, POSTS_PER_PAGE)) {
-      const [[countRow]] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [row.id])
-      const [commentRows] = await db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id])
-      const comments = await Promise.all((commentRows as Comment[]).map(makeComment))
-      posts.push({
-        ...row,
-        user,
-        comment_count: (countRow as CountRow | undefined)?.count || 0,
-        comments: comments.reverse()
-      })
-    }
+    const posts = await makePosts((postRowData as Post[]).slice(0, POSTS_PER_PAGE).map((post) => ({ ...post, user })))
     const [commentCountRows] = await db.query<RowDataPacket[]>('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?', [user.id])
     const commentCount = (commentCountRows[0] as CountRow | undefined)?.count ?? 0
     const [postIdRows] = await db.query<RowDataPacket[]>('SELECT `id` FROM `posts` WHERE `user_id` = ?', [user.id])
@@ -538,7 +507,14 @@ app.get('/posts', async (c: AppContext) => {
     }
     maxCreatedAt = parsed
   }
-  const [postRows] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC', [maxCreatedAt])
+  // Filter hidden authors before limiting, so their posts do not consume page slots.
+  const [postRows] = await db.query<RowDataPacket[]>(
+    'SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` '
+    + 'FROM `posts` AS p INNER JOIN `users` AS u ON u.`id` = p.`user_id` '
+    + 'WHERE p.`created_at` <= ? AND u.`del_flg` = 0 '
+    + 'ORDER BY p.`created_at` DESC LIMIT ?',
+    [maxCreatedAt, POSTS_PER_PAGE]
+  )
   const posts = postRows as Post[]
   const me = await getSessionUser(c)
   const enriched = await makePosts(posts)
