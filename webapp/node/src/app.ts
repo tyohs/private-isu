@@ -6,7 +6,6 @@ import ejs from 'ejs'
 import Memcached from 'memcached'
 import { createPool, Pool, RowDataPacket, ResultSetHeader } from 'mysql2/promise'
 import crypto from 'crypto'
-import { spawnSync } from 'child_process'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { clearUploadedImages, writeImage } from './image-store.js'
@@ -34,7 +33,7 @@ const db: Pool = createPool({
   user: process.env.ISUCONP_DB_USER || 'root',
   password: process.env.ISUCONP_DB_PASSWORD,
   database: process.env.ISUCONP_DB_NAME || 'isuconp',
-  connectionLimit: 1,
+  connectionLimit: 4,
   charset: 'utf8mb4'
 })
 
@@ -201,22 +200,8 @@ app.use('*', async (c: AppContext, next: Next): Promise<void> => {
   }
 })
 
-function shellEscape(arg: string): string {
-  if (arg === '') return "''"
-  return `'${arg.replace(/'/g, `'\\''`)}'`
-}
-
 function digest(src: string): string {
-  const command = `printf "%s" ${shellEscape(src)} | openssl dgst -sha512 | sed 's/^.*= //'`
-  const result = spawnSync('/bin/sh', ['-c', command], {
-    encoding: 'utf8'
-  })
-  if (result.error) throw result.error
-  if (result.status !== 0) {
-    const message = (result.stderr || '').toString().trim()
-    throw new Error(`openssl failed: ${message}`)
-  }
-  return result.stdout.replace(/^.*= /, '').trim()
+  return crypto.createHash('sha512').update(src, 'utf8').digest('hex')
 }
 
 function validateUser(accountName: string, password: string): boolean {
@@ -322,7 +307,7 @@ async function render(c: AppContext, view: string, params: RenderParams): Promis
   const session = c.get('session') as SessionData
   const messages = { notice: session.flashNotice }
   session.flashNotice = undefined
-  const html = await ejs.renderFile(path.join(__dirname, '../views', view), { ...params, messages, formatBody })
+  const html = await ejs.renderFile(path.join(__dirname, '../views', view), { ...params, messages, formatBody }, { cache: true })
   return c.html(html)
 }
 
@@ -454,12 +439,18 @@ app.get('/', async (c: AppContext) => {
       + 'LIMIT 20'
     )
 
+    const commentCounts = new Map<number, number>()
+    if (postUsers.length > 0) {
+      const [countRows] = await db.query<RowDataPacket[]>(
+        'SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`',
+        [postUsers.map((row) => row.id)]
+      )
+      for (const row of countRows) commentCounts.set(row.post_id, row.count)
+    }
+
     let enriched: Post[] = []
     for (const row of postUsers) {
-      const [[commentRows], [[commentCount]]] = await Promise.all([
-        db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id]),
-        db.query<RowDataPacket[]>('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?', [row.id])
-      ])
+      const [commentRows] = await db.query<RowDataPacket[]>('SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC LIMIT 3', [row.id])
 
       const post: Post = {
         id: row.id,
@@ -468,7 +459,7 @@ app.get('/', async (c: AppContext) => {
         body: row.body,
         mime: row.mime,
         created_at: row.post_created_at,
-        comment_count: (commentCount as CountRow | undefined)?.count || 0,
+        comment_count: commentCounts.get(row.id) ?? 0,
         comments: (commentRows as Comment[]).reverse(),
         user: {
           id: row.user_id,
@@ -556,7 +547,7 @@ app.get('/posts', async (c: AppContext) => {
 
 app.get('/posts/:id', async (c: AppContext) => {
   const id = c.req.param('id')
-  const [postRows] = await db.query<RowDataPacket[]>('SELECT * FROM `posts` WHERE `id` = ?', [id])
+  const [postRows] = await db.query<RowDataPacket[]>('SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?', [id])
   const posts = postRows as Post[]
   const enriched = await makePosts(posts, { allComments: true })
   const post = enriched[0]
